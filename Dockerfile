@@ -14,6 +14,7 @@ RUN cd backend && CGO_ENABLED=0 GOOS=linux go build -o /out/server .
 
 FROM alpine:3.19
 WORKDIR /app
+RUN apk add --no-cache ca-certificates docker-cli
 COPY --from=backend /out/server ./server
 COPY --from=web /app/dist ./dist
 ENV BIND_ADDR=0.0.0.0:3000

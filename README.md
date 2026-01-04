@@ -108,6 +108,7 @@ docker build -t rust-panel:latest .
 docker run -d \
   --name rust-panel \
   -p 3000:3000 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
   -e DATABASE_URL="user:pass@tcp(db:3306)/rust?parseTime=true&charset=utf8mb4&loc=Local" \
   -e JWT_SECRET="your-jwt-secret" \
   -e RCON_ENCRYPTION_KEY="your-32-bytes-key" \
@@ -120,7 +121,8 @@ docker run -d \
 
 如果你希望在 Web 面板里触发 `docker exec`（更新/清档），需要满足：
 
-- 运行后端的那台机器上能执行 `docker exec`
+- 运行后端的那台机器上能执行 `docker exec`（需要可访问 Docker daemon）
+- 如果后端运行在容器里，需要挂载宿主机的 `docker.sock`：`-v /var/run/docker.sock:/var/run/docker.sock`
 - 面板里为服务器配置 `container_name`
 
 接口（需要登录后调用）：
@@ -132,6 +134,10 @@ docker run -d \
 
 - 后端不允许任意命令执行，只允许固定动作（update/wipe）
 - `container_name` 只允许符合容器名称规则的字符
+
+安全提示：
+
+- 把 `docker.sock` 挂进容器等同于给容器很高的宿主机权限，请只在可信环境使用，并尽量限制面板的访问范围
 
 ## API 简表
 
