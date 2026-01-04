@@ -1,7 +1,7 @@
 FROM node:20-alpine AS web
 WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci
+COPY package*.json ./
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 COPY . .
 RUN npm run build
 
@@ -19,4 +19,3 @@ COPY --from=web /app/dist ./dist
 ENV BIND_ADDR=0.0.0.0:3000
 EXPOSE 3000
 CMD ["./server"]
-
