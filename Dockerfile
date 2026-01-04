@@ -5,7 +5,7 @@ RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 COPY . .
 RUN npm run build
 
-FROM golang:1.22-alpine AS backend
+FROM golang:1.23-alpine AS backend
 WORKDIR /app
 COPY backend/go.mod backend/go.sum ./backend/
 RUN cd backend && go mod download
