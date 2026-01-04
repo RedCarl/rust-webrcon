@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import { useRcon } from "@/lib/rcon-context";
+import { toast } from "sonner";
 
 export default function ConnectPage() {
   const { connect, status, lastError, previousConnections, savePreviousConnection, removePreviousConnection } = useRcon();
@@ -15,13 +16,19 @@ export default function ConnectPage() {
   const [address, setAddress] = React.useState(() => latest?.Address ?? "");
   const [password, setPassword] = React.useState(() => latest?.Password ?? "");
   const [save, setSave] = React.useState(true);
+  const lastNotifiedErrorRef = React.useRef<string | null>(null);
+  const lastConnectAttemptAtRef = React.useRef<number>(0);
   const isHttps = window.location.protocol === "https:";
   const isWsUrl = address.trim().toLowerCase().startsWith("ws://");
   const incompatibleWs = isHttps && isWsUrl;
 
   React.useEffect(() => {
-    if (status === "open") navigate("/server", { replace: true });
-  }, [navigate, status]);
+    if (!lastError) return;
+    if (Date.now() - lastConnectAttemptAtRef.current > 15_000) return;
+    if (lastNotifiedErrorRef.current === lastError) return;
+    lastNotifiedErrorRef.current = lastError;
+    toast.error(lastError);
+  }, [lastError]);
 
   return (
     <div className="mx-auto flex min-h-dvh max-w-3xl items-center px-4 py-10">
@@ -41,11 +48,6 @@ export default function ConnectPage() {
                 onChange={(e) => setAddress(e.target.value)}
                 autoComplete="off"
               />
-              {incompatibleWs ? (
-                <div className="text-xs text-destructive">
-                  当前页面是 HTTPS，浏览器会阻止 ws://（混合内容）。请使用 wss:// 或通过 Nginx 反向代理把 ws 转成 wss。
-                </div>
-              ) : null}
             </div>
             <div className="grid gap-2">
               <Label htmlFor="password">密码</Label>
@@ -61,19 +63,28 @@ export default function ConnectPage() {
               <input type="checkbox" checked={save} onChange={(e) => setSave(e.target.checked)} />
               记住连接信息
             </label>
-            {lastError ? <div className="text-sm text-destructive">{lastError}</div> : null}
           </CardContent>
           <CardFooter className="gap-2">
             <Button
               className="w-full"
-              disabled={status === "connecting" || incompatibleWs}
+              disabled={status === "connecting"}
               onClick={() => {
                 const addr = address.trim();
                 const pw = password.trim();
+                if (!addr) {
+                  toast.error("请输入地址");
+                  return;
+                }
+                if (incompatibleWs) {
+                  toast.error("当前页面是 HTTPS，浏览器会阻止 ws://（混合内容）。请使用 wss:// 或通过 Nginx 反向代理把 ws 转成 wss。");
+                  return;
+                }
+                lastConnectAttemptAtRef.current = Date.now();
                 connect(addr, pw);
                 if (save && addr) {
                   savePreviousConnection({ Address: addr, Password: pw, date: new Date().toISOString() });
                 }
+                navigate("/server");
               }}
             >
               {status === "connecting" ? "连接中…" : "连接"}
@@ -107,14 +118,18 @@ export default function ConnectPage() {
                     onClick={() => {
                       if (status === "connecting") return;
                       setSave(false);
+                      lastConnectAttemptAtRef.current = Date.now();
                       connect(c.Address, c.Password);
+                      navigate("/server");
                     }}
                     onKeyDown={(e) => {
                       if (status === "connecting") return;
                       if (e.key === "Enter" || e.key === " ") {
                         e.preventDefault();
                         setSave(false);
+                        lastConnectAttemptAtRef.current = Date.now();
                         connect(c.Address, c.Password);
+                        navigate("/server");
                       }
                     }}
                   >

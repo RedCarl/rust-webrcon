@@ -6,30 +6,33 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"database/sql"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/argon2"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 type appState struct {
-	db          *sql.DB
+	store       *jsonStore
 	jwtSecret   []byte
 	rconAead    cipher.AEAD
+	dockerBin   string
 	authorLabel string
 }
 
@@ -37,23 +40,38 @@ type apiErrorBody struct {
 	Message string `json:"message"`
 }
 
+type appConfig struct {
+	BindAddr          string `json:"bind_addr"`
+	JWTSecret         string `json:"jwt_secret"`
+	RconEncryptionKey string `json:"rcon_encryption_key"`
+	DataDir           string `json:"data_dir"`
+	DockerBin         string `json:"docker_bin"`
+}
+
 func main() {
-	dsn := mustEnv("DATABASE_URL")
-	jwtSecret := []byte(mustEnv("JWT_SECRET"))
-	rconKey := must32ByteKey(mustEnv("RCON_ENCRYPTION_KEY"))
+	configPath := flag.String("config", "./config.json", "配置文件路径")
+	flag.Parse()
 
-	db, err := sql.Open("mysql", dsn)
+	cfg, err := loadConfig(*configPath)
 	if err != nil {
-		log.Fatalf("连接数据库失败：%v", err)
+		log.Fatalf("读取配置文件失败：%v", err)
 	}
-	defer db.Close()
-
-	if err := db.Ping(); err != nil {
-		log.Fatalf("连接数据库失败：%v", err)
+	if err := cfg.validate(); err != nil {
+		log.Fatalf("配置文件不合法：%v", err)
 	}
 
-	if err := bootstrapSchema(db); err != nil {
-		log.Fatalf("初始化数据库结构失败：%v", err)
+	jwtSecret := []byte(cfg.JWTSecret)
+	rconKey, err := parse32ByteKey(cfg.RconEncryptionKey)
+	if err != nil {
+		log.Fatalf("配置文件不合法：%v", err)
+	}
+
+	store, err := openJSONStore(cfg.DataDir)
+	if err != nil {
+		log.Fatalf("初始化数据文件失败：%v", err)
+	}
+	if err := ensureDefaultUser(store); err != nil {
+		log.Fatalf("初始化默认用户失败：%v", err)
 	}
 
 	block, err := aes.NewCipher(rconKey)
@@ -66,16 +84,18 @@ func main() {
 	}
 
 	state := &appState{
-		db:          db,
+		store:       store,
 		jwtSecret:   jwtSecret,
 		rconAead:    aead,
+		dockerBin:   cfg.DockerBin,
 		authorLabel: "CarlJoy",
 	}
 
-	addr := getenvDefault("BIND_ADDR", "0.0.0.0:3000")
+	addr := cfg.BindAddr
 	log.Printf("[%s] 后端启动：%s", state.authorLabel, addr)
 
 	router := gin.New()
+	router.Use(gin.Logger())
 	router.Use(gin.Recovery())
 	router.Use(corsMiddleware())
 
@@ -97,6 +117,8 @@ func main() {
 			auth.POST("/login", state.ginLogin)
 		}
 
+		api.GET("/servers/:id/last-wipe", state.ginGetServerLastWipe)
+
 		protected := api.Group("/")
 		protected.Use(state.ginAuthRequired())
 		{
@@ -114,36 +136,48 @@ func main() {
 	}
 }
 
-func mustEnv(key string) string {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		log.Fatalf("缺少环境变量：%s", key)
+func ensureDefaultUser(store *jsonStore) error {
+	if u, ok := store.FindUserByUsername("system"); ok {
+		ok, err := verifyPassword("123456", u.PasswordHash)
+		if err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
+		hash, err := hashPassword("123456")
+		if err != nil {
+			return err
+		}
+		return store.UpdateUserPasswordHash("system", hash)
 	}
-	return v
+	hash, err := hashPassword("123456")
+	if err != nil {
+		return err
+	}
+	if _, err := store.CreateUser("system", hash); err != nil {
+		if errors.Is(err, errUserExists) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
-func getenvDefault(key, def string) string {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		return def
-	}
-	return v
-}
-
-func must32ByteKey(raw string) []byte {
+func parse32ByteKey(raw string) ([]byte, error) {
 	s := strings.TrimSpace(raw)
 	if len(s) == 64 && isHexString(s) {
 		b, err := hex.DecodeString(s)
 		if err != nil || len(b) != 32 {
-			log.Fatalf("RCON_ENCRYPTION_KEY 需要是 32 字节（base64/hex）")
+			return nil, errors.New("rcon_encryption_key 需要是 32 字节（base64/hex）")
 		}
-		return b
+		return b, nil
 	}
 	b, err := base64.StdEncoding.DecodeString(s)
 	if err != nil || len(b) != 32 {
-		log.Fatalf("RCON_ENCRYPTION_KEY 需要是 32 字节（base64/hex）")
+		return nil, errors.New("rcon_encryption_key 需要是 32 字节（base64/hex）")
 	}
-	return b
+	return b, nil
 }
 
 func isHexString(s string) bool {
@@ -153,6 +187,101 @@ func isHexString(s string) bool {
 		}
 	}
 	return true
+}
+
+func loadConfig(path string) (appConfig, error) {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return appConfig{}, errors.New("配置文件路径为空")
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return initConfigFile(p)
+		}
+		return appConfig{}, err
+	}
+	if len(bytes.TrimSpace(b)) == 0 {
+		return initConfigFile(p)
+	}
+	var cfg appConfig
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		return appConfig{}, err
+	}
+	cfg.normalize()
+	return cfg, nil
+}
+
+func initConfigFile(path string) (appConfig, error) {
+	dir := filepath.Dir(path)
+	if dir != "." && dir != "/" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return appConfig{}, err
+		}
+	}
+
+	jwtSecret := make([]byte, 32)
+	if _, err := rand.Read(jwtSecret); err != nil {
+		return appConfig{}, err
+	}
+
+	rconKey := make([]byte, 32)
+	if _, err := rand.Read(rconKey); err != nil {
+		return appConfig{}, err
+	}
+
+	cfg := appConfig{
+		BindAddr:          "0.0.0.0:8084",
+		JWTSecret:         hex.EncodeToString(jwtSecret),
+		RconEncryptionKey: base64.StdEncoding.EncodeToString(rconKey),
+		DataDir:           ".",
+		DockerBin:         "docker",
+	}
+	cfg.normalize()
+
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return appConfig{}, err
+	}
+
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return appConfig{}, err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return appConfig{}, err
+	}
+	return cfg, nil
+}
+
+func (c *appConfig) normalize() {
+	c.BindAddr = strings.TrimSpace(c.BindAddr)
+	if c.BindAddr == "" {
+		c.BindAddr = "0.0.0.0:8084"
+	}
+	c.JWTSecret = strings.TrimSpace(c.JWTSecret)
+	c.RconEncryptionKey = strings.TrimSpace(c.RconEncryptionKey)
+	c.DataDir = strings.TrimSpace(c.DataDir)
+	if c.DataDir == "" {
+		c.DataDir = "."
+	}
+	c.DockerBin = strings.TrimSpace(c.DockerBin)
+	if c.DockerBin == "" {
+		c.DockerBin = "docker"
+	}
+}
+
+func (c *appConfig) validate() error {
+	if c.JWTSecret == "" {
+		return errors.New("jwt_secret 不能为空")
+	}
+	if c.RconEncryptionKey == "" {
+		return errors.New("rcon_encryption_key 不能为空")
+	}
+	if c.DataDir == "" {
+		return errors.New("data_dir 不能为空")
+	}
+	return nil
 }
 
 func corsMiddleware() gin.HandlerFunc {
@@ -167,37 +296,6 @@ func corsMiddleware() gin.HandlerFunc {
 		}
 		c.Next()
 	}
-}
-
-func bootstrapSchema(db *sql.DB) error {
-	_, err := db.Exec(`
-CREATE TABLE IF NOT EXISTS users (
-  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-  username VARCHAR(64) NOT NULL UNIQUE,
-  password_hash VARCHAR(255) NOT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-`)
-	if err != nil {
-		return err
-	}
-
-	_, err = db.Exec(`
-CREATE TABLE IF NOT EXISTS servers (
-  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-  user_id BIGINT UNSIGNED NOT NULL,
-  name VARCHAR(128) NOT NULL,
-  host VARCHAR(255) NOT NULL,
-  port INT UNSIGNED NOT NULL,
-  rcon_password_ciphertext TEXT NOT NULL,
-  container_name VARCHAR(128) NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
-  INDEX idx_user_id (user_id),
-  CONSTRAINT fk_servers_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-`)
-	return err
 }
 
 type registerRequest struct {
@@ -233,18 +331,20 @@ func (s *appState) ginRegister(c *gin.Context) {
 		return
 	}
 
-	res, err := s.db.Exec("INSERT INTO users (username, password_hash) VALUES (?, ?)", username, hash)
+	u, err := s.store.CreateUser(username, hash)
 	if err != nil {
-		if isMySQLDuplicate(err) {
+		if errors.Is(err, errUserExists) {
 			c.JSON(409, apiErrorBody{Message: "用户名已存在"})
+			return
+		}
+		if err.Error() == "invalid username" {
+			c.JSON(400, apiErrorBody{Message: "用户名格式不合法"})
 			return
 		}
 		c.JSON(500, apiErrorBody{Message: "创建用户失败"})
 		return
 	}
-
-	id, _ := res.LastInsertId()
-	c.JSON(200, registerResponse{ID: uint64(id), Username: username})
+	c.JSON(200, registerResponse{ID: u.ID, Username: u.Username})
 }
 
 type loginRequest struct {
@@ -265,25 +365,28 @@ func (s *appState) ginLogin(c *gin.Context) {
 	username := strings.TrimSpace(req.Username)
 	password := strings.TrimSpace(req.Password)
 	if username == "" || password == "" {
-		c.JSON(401, apiErrorBody{Message: "未登录或登录已失效"})
+		c.JSON(400, apiErrorBody{Message: "用户名或密码不能为空"})
 		return
 	}
 
-	var id uint64
-	var passwordHash string
-	err := s.db.QueryRow("SELECT id, password_hash FROM users WHERE username = ?", username).Scan(&id, &passwordHash)
-	if err != nil {
-		c.JSON(401, apiErrorBody{Message: "未登录或登录已失效"})
+	u, ok := s.store.FindUserByUsername(username)
+	if !ok {
+		c.JSON(401, apiErrorBody{Message: "账号不存在"})
 		return
 	}
 
-	ok, err := verifyPassword(password, passwordHash)
-	if err != nil || !ok {
-		c.JSON(401, apiErrorBody{Message: "未登录或登录已失效"})
+	passOK, err := verifyPassword(password, u.PasswordHash)
+	if err != nil || !passOK {
+		c.JSON(401, apiErrorBody{Message: "密码错误"})
 		return
 	}
+	if strings.HasPrefix(u.PasswordHash, "argon2id$") {
+		if next, err := hashPassword(password); err == nil {
+			_ = s.store.UpdateUserPasswordHash(u.Username, next)
+		}
+	}
 
-	token, err := signJWT(s.jwtSecret, id)
+	token, err := signJWT(s.jwtSecret, u.ID)
 	if err != nil {
 		c.JSON(500, apiErrorBody{Message: "生成 token 失败"})
 		return
@@ -299,14 +402,12 @@ type meResponse struct {
 
 func (s *appState) ginMe(c *gin.Context) {
 	userID := mustUserID(c)
-	var id uint64
-	var username string
-	err := s.db.QueryRow("SELECT id, username FROM users WHERE id = ?", userID).Scan(&id, &username)
-	if err != nil {
+	u, ok := s.store.FindUserByID(userID)
+	if !ok {
 		c.JSON(401, apiErrorBody{Message: "未登录或登录已失效"})
 		return
 	}
-	c.JSON(200, meResponse{ID: id, Username: username})
+	c.JSON(200, meResponse{ID: u.ID, Username: u.Username})
 }
 
 type serverDTO struct {
@@ -320,49 +421,21 @@ type serverDTO struct {
 
 func (s *appState) ginListServers(c *gin.Context) {
 	userID := mustUserID(c)
-	rows, err := s.db.Query("SELECT id, name, host, port, rcon_password_ciphertext, container_name FROM servers WHERE user_id = ? ORDER BY id DESC", userID)
-	if err != nil {
-		c.JSON(500, apiErrorBody{Message: "查询服务器失败"})
-		return
-	}
-	defer rows.Close()
-
-	var out []serverDTO
-	for rows.Next() {
-		var (
-			id           uint64
-			name         string
-			host         string
-			port         uint32
-			cipherText   string
-			containerNil sql.NullString
-		)
-		if err := rows.Scan(&id, &name, &host, &port, &cipherText, &containerNil); err != nil {
-			c.JSON(500, apiErrorBody{Message: "查询服务器失败"})
-			return
-		}
-		pw, err := s.decryptRconPassword(cipherText)
+	servers := s.store.ListServersByUserID(userID)
+	out := make([]serverDTO, 0, len(servers))
+	for _, srv := range servers {
+		pw, err := s.decryptRconPassword(srv.RconPasswordCipher)
 		if err != nil {
 			c.JSON(500, apiErrorBody{Message: "查询服务器失败"})
 			return
 		}
-		var containerName *string
-		if containerNil.Valid {
-			v := strings.TrimSpace(containerNil.String)
-			if v != "" {
-				containerName = &v
-			}
-		}
-		if port > 65535 {
-			continue
-		}
 		out = append(out, serverDTO{
-			ID:            id,
-			Name:          name,
-			Host:          host,
-			Port:          uint16(port),
+			ID:            srv.ID,
+			Name:          srv.Name,
+			Host:          srv.Host,
+			Port:          srv.Port,
 			RconPassword:  pw,
-			ContainerName: containerName,
+			ContainerName: srv.ContainerName,
 		})
 	}
 	c.JSON(200, out)
@@ -406,22 +479,19 @@ func (s *appState) ginCreateServer(c *gin.Context) {
 		return
 	}
 
-	res, err := s.db.Exec("INSERT INTO servers (user_id, name, host, port, rcon_password_ciphertext, container_name) VALUES (?, ?, ?, ?, ?, ?)",
-		userID, name, host, uint32(req.Port), cipherText, containerName,
-	)
+	srv, err := s.store.CreateServer(userID, name, host, req.Port, cipherText, containerName)
 	if err != nil {
 		c.JSON(500, apiErrorBody{Message: "创建服务器失败"})
 		return
 	}
-	id, _ := res.LastInsertId()
 
 	c.JSON(200, serverDTO{
-		ID:            uint64(id),
-		Name:          name,
-		Host:          host,
-		Port:          req.Port,
+		ID:            srv.ID,
+		Name:          srv.Name,
+		Host:          srv.Host,
+		Port:          srv.Port,
 		RconPassword:  pw,
-		ContainerName: containerName,
+		ContainerName: srv.ContainerName,
 	})
 }
 
@@ -440,19 +510,6 @@ func (s *appState) ginUpdateServer(c *gin.Context) {
 		c.JSON(404, apiErrorBody{Message: "资源不存在"})
 		return
 	}
-	var current struct {
-		name       string
-		host       string
-		port       uint32
-		cipherText string
-		container  sql.NullString
-	}
-	err = s.db.QueryRow("SELECT name, host, port, rcon_password_ciphertext, container_name FROM servers WHERE id = ? AND user_id = ?", id, userID).
-		Scan(&current.name, &current.host, &current.port, &current.cipherText, &current.container)
-	if err != nil {
-		c.JSON(404, apiErrorBody{Message: "资源不存在"})
-		return
-	}
 
 	var req updateServerRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -460,73 +517,66 @@ func (s *appState) ginUpdateServer(c *gin.Context) {
 		return
 	}
 
-	name := current.name
-	host := current.host
-	port := current.port
-	cipherText := current.cipherText
-	containerName := normalizeOptionalStringPtrFromNull(current.container)
-
-	if req.Name != nil {
-		v := strings.TrimSpace(*req.Name)
-		if v == "" {
-			c.JSON(400, apiErrorBody{Message: "服务器名称不能为空"})
-			return
+	updated, err := s.store.UpdateServer(userID, id, func(srv *storedServer) error {
+		if req.Name != nil {
+			v := strings.TrimSpace(*req.Name)
+			if v == "" {
+				return errors.New("服务器名称不能为空")
+			}
+			srv.Name = v
 		}
-		name = v
-	}
-	if req.Host != nil {
-		v := strings.TrimSpace(*req.Host)
-		if v == "" {
-			c.JSON(400, apiErrorBody{Message: "服务器地址不能为空"})
-			return
+		if req.Host != nil {
+			v := strings.TrimSpace(*req.Host)
+			if v == "" {
+				return errors.New("服务器地址不能为空")
+			}
+			srv.Host = v
 		}
-		host = v
-	}
-	if req.Port != nil {
-		port = uint32(*req.Port)
-	}
-	if req.RconPassword != nil {
-		v := strings.TrimSpace(*req.RconPassword)
-		if v == "" {
-			c.JSON(400, apiErrorBody{Message: "RCON 密码不能为空"})
-			return
+		if req.Port != nil {
+			srv.Port = *req.Port
 		}
-		var err error
-		cipherText, err = s.encryptRconPassword(v)
-		if err != nil {
-			c.JSON(500, apiErrorBody{Message: "更新服务器失败"})
-			return
+		if req.RconPassword != nil {
+			v := strings.TrimSpace(*req.RconPassword)
+			if v == "" {
+				return errors.New("RCON 密码不能为空")
+			}
+			cipherText, err := s.encryptRconPassword(v)
+			if err != nil {
+				return err
+			}
+			srv.RconPasswordCipher = cipherText
 		}
-	}
-	if req.ContainerName != nil {
-		containerName = normalizeOptionalString(req.ContainerName)
-	}
-
-	_, err = s.db.Exec("UPDATE servers SET name = ?, host = ?, port = ?, rcon_password_ciphertext = ?, container_name = ? WHERE id = ? AND user_id = ?",
-		name, host, port, cipherText, containerName, id, userID,
-	)
+		if req.ContainerName != nil {
+			srv.ContainerName = normalizeOptionalString(req.ContainerName)
+		}
+		return nil
+	})
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			c.JSON(404, apiErrorBody{Message: "资源不存在"})
+			return
+		}
+		if err.Error() == "服务器名称不能为空" || err.Error() == "服务器地址不能为空" || err.Error() == "RCON 密码不能为空" {
+			c.JSON(400, apiErrorBody{Message: err.Error()})
+			return
+		}
 		c.JSON(500, apiErrorBody{Message: "更新服务器失败"})
 		return
 	}
 
-	pw, err := s.decryptRconPassword(cipherText)
+	pw, err := s.decryptRconPassword(updated.RconPasswordCipher)
 	if err != nil {
-		c.JSON(500, apiErrorBody{Message: "更新服务器失败"})
-		return
-	}
-	if port > 65535 {
 		c.JSON(500, apiErrorBody{Message: "更新服务器失败"})
 		return
 	}
 
 	c.JSON(200, serverDTO{
 		ID:            id,
-		Name:          name,
-		Host:          host,
-		Port:          uint16(port),
+		Name:          updated.Name,
+		Host:          updated.Host,
+		Port:          updated.Port,
 		RconPassword:  pw,
-		ContainerName: containerName,
+		ContainerName: updated.ContainerName,
 	})
 }
 
@@ -537,17 +587,32 @@ func (s *appState) ginDeleteServer(c *gin.Context) {
 		c.JSON(404, apiErrorBody{Message: "资源不存在"})
 		return
 	}
-	res, err := s.db.Exec("DELETE FROM servers WHERE id = ? AND user_id = ?", id, userID)
+	ok, err := s.store.DeleteServer(userID, id)
 	if err != nil {
 		c.JSON(500, apiErrorBody{Message: "删除服务器失败"})
 		return
 	}
-	affected, _ := res.RowsAffected()
-	if affected == 0 {
+	if !ok {
 		c.JSON(404, apiErrorBody{Message: "资源不存在"})
 		return
 	}
 	c.Status(204)
+}
+
+func (s *appState) ginGetServerLastWipe(c *gin.Context) {
+	id, err := parseUint64Param(c, "id")
+	if err != nil {
+		c.Status(404)
+		return
+	}
+
+	srv, found := s.store.FindServerByIDAny(id)
+	if !found {
+		c.Status(404)
+		return
+	}
+
+	c.String(200, strings.TrimSpace(srv.LastWipeAt))
 }
 
 func normalizeOptionalString(v *string) *string {
@@ -555,17 +620,6 @@ func normalizeOptionalString(v *string) *string {
 		return nil
 	}
 	s := strings.TrimSpace(*v)
-	if s == "" {
-		return nil
-	}
-	return &s
-}
-
-func normalizeOptionalStringPtrFromNull(v sql.NullString) *string {
-	if !v.Valid {
-		return nil
-	}
-	s := strings.TrimSpace(v.String)
 	if s == "" {
 		return nil
 	}
@@ -625,18 +679,17 @@ func (s *appState) ginServerAction(c *gin.Context) {
 		return
 	}
 
-	var container sql.NullString
-	err = s.db.QueryRow("SELECT container_name FROM servers WHERE id = ? AND user_id = ?", id, userID).Scan(&container)
-	if err != nil {
+	srv, found := s.store.FindServerByID(userID, id)
+	if !found {
 		c.JSON(404, apiErrorBody{Message: "资源不存在"})
 		return
 	}
-	if !container.Valid || strings.TrimSpace(container.String) == "" {
+	if srv.ContainerName == nil || strings.TrimSpace(*srv.ContainerName) == "" {
 		c.JSON(400, apiErrorBody{Message: "该服务器未配置容器名称"})
 		return
 	}
 
-	containerName := strings.TrimSpace(container.String)
+	containerName := strings.TrimSpace(*srv.ContainerName)
 	if !dockerNameRe.MatchString(containerName) {
 		c.JSON(400, apiErrorBody{Message: "容器名称格式不合法"})
 		return
@@ -645,7 +698,7 @@ func (s *appState) ginServerAction(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Minute)
 	defer cancel()
 
-	stdout, stderr, exitCode, err := dockerExecRustServer(ctx, containerName, dockerArg)
+	stdout, stderr, exitCode, err := dockerExecRustServer(ctx, s.dockerBin, containerName, dockerArg)
 	if err != nil && exitCode == 0 {
 		c.JSON(500, apiErrorBody{Message: "执行失败"})
 		return
@@ -668,8 +721,7 @@ func mapServerAction(action string) (string, bool) {
 	}
 }
 
-func dockerExecRustServer(ctx context.Context, containerName string, rustServerArg string) (stdout string, stderr string, exitCode int, err error) {
-	dockerBin := getenvDefault("DOCKER_BIN", "docker")
+func dockerExecRustServer(ctx context.Context, dockerBin string, containerName string, rustServerArg string) (stdout string, stderr string, exitCode int, err error) {
 	if _, lookErr := exec.LookPath(dockerBin); lookErr != nil {
 		return "", "", 127, lookErr
 	}
@@ -809,11 +861,6 @@ func (s *appState) decryptRconPassword(encoded string) (string, error) {
 	return string(plain), nil
 }
 
-func isMySQLDuplicate(err error) bool {
-	msg := err.Error()
-	return strings.Contains(msg, "Error 1062") || strings.Contains(strings.ToLower(msg), "duplicate entry")
-}
-
 type argonParams struct {
 	memory  uint32
 	time    uint32
@@ -828,19 +875,70 @@ var defaultArgon = argonParams{
 	keyLen:  32,
 }
 
+type pbkdf2Params struct {
+	iter   int
+	keyLen int
+}
+
+var defaultPbkdf2 = pbkdf2Params{
+	iter:   120000,
+	keyLen: 32,
+}
+
 func hashPassword(password string) (string, error) {
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
 	}
-	hash := argon2.IDKey([]byte(password), salt, defaultArgon.time, defaultArgon.memory, defaultArgon.threads, defaultArgon.keyLen)
 
+	hash := pbkdf2.Key([]byte(password), salt, defaultPbkdf2.iter, defaultPbkdf2.keyLen, sha256.New)
 	b64Salt := base64.RawStdEncoding.EncodeToString(salt)
 	b64Hash := base64.RawStdEncoding.EncodeToString(hash)
-	return fmt.Sprintf("argon2id$v=19$m=%d,t=%d,p=%d$%s$%s", defaultArgon.memory, defaultArgon.time, defaultArgon.threads, b64Salt, b64Hash), nil
+	return fmt.Sprintf("pbkdf2_sha256$i=%d$%s$%s", defaultPbkdf2.iter, b64Salt, b64Hash), nil
 }
 
 func verifyPassword(password, encoded string) (bool, error) {
+	if strings.HasPrefix(encoded, "pbkdf2_sha256$") {
+		return verifyPasswordPBKDF2SHA256(password, encoded)
+	}
+	if strings.HasPrefix(encoded, "argon2id$") {
+		return verifyPasswordArgon2id(password, encoded)
+	}
+	return false, errors.New("invalid hash format")
+}
+
+func verifyPasswordPBKDF2SHA256(password, encoded string) (bool, error) {
+	parts := strings.Split(encoded, "$")
+	if len(parts) != 4 {
+		return false, errors.New("invalid hash format")
+	}
+	if parts[0] != "pbkdf2_sha256" {
+		return false, errors.New("invalid hash format")
+	}
+	if !strings.HasPrefix(parts[1], "i=") {
+		return false, errors.New("invalid hash format")
+	}
+	iterAny, err := strconv.ParseUint(strings.TrimPrefix(parts[1], "i="), 10, 32)
+	if err != nil {
+		return false, errors.New("invalid hash format")
+	}
+	iter := int(iterAny)
+	if iter <= 0 {
+		return false, errors.New("invalid hash format")
+	}
+	salt, err := base64.RawStdEncoding.DecodeString(parts[2])
+	if err != nil {
+		return false, errors.New("invalid hash format")
+	}
+	hash, err := base64.RawStdEncoding.DecodeString(parts[3])
+	if err != nil {
+		return false, errors.New("invalid hash format")
+	}
+	other := pbkdf2.Key([]byte(password), salt, iter, len(hash), sha256.New)
+	return subtleConstantTimeCompare(hash, other), nil
+}
+
+func verifyPasswordArgon2id(password, encoded string) (bool, error) {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 {
 		return false, errors.New("invalid hash format")

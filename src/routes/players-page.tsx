@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Link } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useRcon } from "@/lib/rcon-context";
+import { toast } from "sonner";
 
 type Player = {
   SteamID: string;
@@ -38,6 +39,7 @@ function secondsToDuration(input?: number) {
 }
 
 export default function PlayersPage() {
+  const { serverId } = useParams();
   const { request, send } = useRcon();
   const [players, setPlayers] = React.useState<Player[]>([]);
   const [query, setQuery] = React.useState("");
@@ -46,7 +48,6 @@ export default function PlayersPage() {
   const [banTarget, setBanTarget] = React.useState<Player | null>(null);
   const [banDuration, setBanDuration] = React.useState("1d");
   const [banReason, setBanReason] = React.useState("");
-  const [banError, setBanError] = React.useState<string | null>(null);
 
   const refresh = React.useCallback(async () => {
     setLoading(true);
@@ -54,6 +55,9 @@ export default function PlayersPage() {
       const res = await request("playerlist");
       const parsed = JSON.parse(res.Message) as Player[];
       setPlayers(Array.isArray(parsed) ? parsed : []);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "加载失败");
+      setPlayers([]);
     } finally {
       setLoading(false);
     }
@@ -67,7 +71,6 @@ export default function PlayersPage() {
     setBanTarget(p);
     setBanDuration("1d");
     setBanReason("");
-    setBanError(null);
     setBanOpen(true);
   }, []);
 
@@ -81,7 +84,7 @@ export default function PlayersPage() {
     .sort((a, b) => (b.ConnectedSeconds ?? 0) - (a.ConnectedSeconds ?? 0));
 
   return (
-    <div className="grid gap-4">
+    <div className="flex h-full flex-col gap-4 overflow-hidden">
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div className="min-w-0">
           <div className="text-lg font-semibold">玩家列表</div>
@@ -95,60 +98,65 @@ export default function PlayersPage() {
         </div>
       </div>
 
-      <Card>
+      <Card className="flex min-h-0 flex-1 flex-col">
         <CardHeader>
           <CardTitle>在线玩家（{filtered.length}）</CardTitle>
         </CardHeader>
-        <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>昵称</TableHead>
-                <TableHead>SteamID</TableHead>
-                <TableHead>在线时长</TableHead>
-                <TableHead>Ping</TableHead>
-                <TableHead className="text-right">操作</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {filtered.map((p) => (
+        <CardContent className="min-h-0 flex flex-1 flex-col overflow-hidden">
+          <div className="table-scroll relative min-h-0 flex-1 overflow-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="sticky top-0 z-10 bg-card">昵称</TableHead>
+                  <TableHead className="sticky top-0 z-10 bg-card">SteamID</TableHead>
+                  <TableHead className="sticky top-0 z-10 bg-card">在线时长</TableHead>
+                  <TableHead className="sticky top-0 z-10 bg-card">Ping</TableHead>
+                  <TableHead className="sticky top-0 z-10 bg-card text-right">操作</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filtered.map((p) => (
                 <TableRow key={p.SteamID}>
                   <TableCell className="font-medium">
-                    <Link className="hover:underline" to={`/players/${encodeURIComponent(p.SteamID)}`}>
+                    <Link
+                      className="hover:underline"
+                      to={serverId ? `/server/${serverId}/players/${encodeURIComponent(p.SteamID)}` : `/players/${encodeURIComponent(p.SteamID)}`}
+                    >
                       {p.DisplayName ?? "-"}
                     </Link>
                   </TableCell>
                   <TableCell className="font-mono text-xs">{p.SteamID}</TableCell>
                   <TableCell>{secondsToDuration(p.ConnectedSeconds)}</TableCell>
-                  <TableCell>{p.Ping ?? "-"}</TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex justify-end gap-2">
-                      <Button variant="secondary" size="sm" onClick={() => openBan(p)}>
-                        封禁
-                      </Button>
-                      <Button
-                        variant="destructive"
-                        size="sm"
-                        onClick={() => {
-                          send(`kick ${p.SteamID}`);
-                          setTimeout(() => refresh(), 300);
-                        }}
-                      >
-                        踢出
-                      </Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
-              {filtered.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={5} className="py-8 text-center text-sm text-muted-foreground">
-                    暂无数据
-                  </TableCell>
-                </TableRow>
-              ) : null}
-            </TableBody>
-          </Table>
+                    <TableCell>{p.Ping ?? "-"}</TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex justify-end gap-2">
+                        <Button variant="secondary" size="sm" onClick={() => openBan(p)}>
+                          封禁
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => {
+                            send(`kick ${p.SteamID}`);
+                            setTimeout(() => refresh(), 300);
+                          }}
+                        >
+                          踢出
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+                {filtered.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={5} className="py-8 text-center text-sm text-muted-foreground">
+                      暂无数据
+                    </TableCell>
+                  </TableRow>
+                ) : null}
+              </TableBody>
+            </Table>
+          </div>
         </CardContent>
       </Card>
 
@@ -158,7 +166,6 @@ export default function PlayersPage() {
           setBanOpen(open);
           if (!open) {
             setBanTarget(null);
-            setBanError(null);
           }
         }}
       >
@@ -180,11 +187,10 @@ export default function PlayersPage() {
               const reason = banReason.trim();
 
               if (!reason) {
-                setBanError("请输入封禁理由");
+                toast.error("请输入封禁理由");
                 return;
               }
 
-              setBanError(null);
               if (duration) {
                 send(`ban ${banTarget.SteamID} ${duration} ${reason}`);
               } else {
@@ -220,8 +226,6 @@ export default function PlayersPage() {
                 placeholder="请输入封禁理由"
               />
             </div>
-
-            {banError ? <div className="text-sm text-destructive">{banError}</div> : null}
 
             <DialogFooter>
               <Button type="button" variant="secondary" onClick={() => setBanOpen(false)}>

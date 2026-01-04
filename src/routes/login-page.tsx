@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { apiJson, getToken, setToken } from "@/lib/auth";
+import { toast } from "sonner";
 
 type LoginResponse = { token: string };
 type RegisterResponse = { id: number; username: string };
@@ -14,7 +15,6 @@ export default function LoginPage() {
   const [username, setUsername] = React.useState("");
   const [password, setPassword] = React.useState("");
   const [loading, setLoading] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     if (getToken()) navigate("/servers", { replace: true });
@@ -49,7 +49,6 @@ export default function LoginPage() {
               disabled={loading}
             />
           </div>
-          {error ? <div className="text-sm text-destructive">{error}</div> : null}
         </CardContent>
         <CardFooter>
           <div className="flex w-full gap-2">
@@ -57,7 +56,6 @@ export default function LoginPage() {
               className="flex-1"
               disabled={loading}
               onClick={async () => {
-                setError(null);
                 setLoading(true);
                 try {
                   const res = await apiJson<LoginResponse>("/api/auth/login", {
@@ -67,7 +65,7 @@ export default function LoginPage() {
                   setToken(res.token);
                   navigate("/servers", { replace: true });
                 } catch (e) {
-                  setError(e instanceof Error ? e.message : "登录失败");
+                  toast.error(e instanceof Error ? e.message : "登录失败");
                 } finally {
                   setLoading(false);
                 }
@@ -80,7 +78,6 @@ export default function LoginPage() {
               variant="secondary"
               disabled={loading}
               onClick={async () => {
-                setError(null);
                 setLoading(true);
                 try {
                   await apiJson<RegisterResponse>("/api/auth/register", {
@@ -94,7 +91,7 @@ export default function LoginPage() {
                   setToken(res.token);
                   navigate("/servers", { replace: true });
                 } catch (e) {
-                  setError(e instanceof Error ? e.message : "注册失败");
+                  toast.error(e instanceof Error ? e.message : "注册失败");
                 } finally {
                   setLoading(false);
                 }

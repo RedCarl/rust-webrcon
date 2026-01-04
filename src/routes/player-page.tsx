@@ -8,7 +8,7 @@ import { useRcon } from "@/lib/rcon-context";
 type Player = Record<string, unknown> & { SteamID: string; DisplayName?: string };
 
 export default function PlayerPage() {
-  const { steamId } = useParams();
+  const { steamId, serverId } = useParams();
   const id = decodeURIComponent(String(steamId ?? ""));
   const { request } = useRcon();
   const [player, setPlayer] = React.useState<Player | null>(null);
@@ -45,7 +45,7 @@ export default function PlayerPage() {
         </div>
         <div className="flex items-center gap-2">
           <Button variant="secondary" asChild>
-            <Link to="/players">返回列表</Link>
+            <Link to={serverId ? `/server/${serverId}/players` : "/players"}>返回列表</Link>
           </Button>
           <Button variant="secondary" onClick={refresh}>
             刷新
@@ -59,18 +59,20 @@ export default function PlayerPage() {
         </CardHeader>
         <CardContent>
           {player ? (
-            <Table>
-              <TableBody>
-                {Object.entries(player).map(([k, v]) => (
-                  <TableRow key={k}>
-                    <TableCell className="w-[200px] text-sm text-muted-foreground">{k}</TableCell>
-                    <TableCell className="font-mono text-xs whitespace-pre-wrap break-words">
-                      {typeof v === "string" ? v : JSON.stringify(v)}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+            <div className="relative w-full overflow-x-auto">
+              <Table>
+                <TableBody>
+                  {Object.entries(player).map(([k, v]) => (
+                    <TableRow key={k}>
+                      <TableCell className="w-[200px] text-sm text-muted-foreground">{k}</TableCell>
+                      <TableCell className="font-mono text-xs whitespace-pre-wrap break-words">
+                        {typeof v === "string" ? v : JSON.stringify(v)}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
           ) : (
             <div className="py-10 text-center text-sm text-muted-foreground">玩家不在线或不存在</div>
           )}
@@ -79,4 +81,3 @@ export default function PlayerPage() {
     </div>
   );
 }
-
