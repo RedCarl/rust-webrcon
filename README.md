@@ -99,19 +99,19 @@ go build ./...
 ### 构建镜像
 
 ```bash
-docker build -t rust-servers:latest .
+docker build -t rust-panel:latest .
 ```
 
 ### 运行容器
 
 ```bash
 docker run -d \
-  --name rust-servers \
+  --name rust-panel \
   -p 3000:3000 \
   -e DATABASE_URL="user:pass@tcp(db:3306)/rust?parseTime=true&charset=utf8mb4&loc=Local" \
   -e JWT_SECRET="your-jwt-secret" \
   -e RCON_ENCRYPTION_KEY="your-32-bytes-key" \
-  rust-servers:latest
+  rust-panel:latest
 ```
 
 浏览器访问：`http://localhost:3000/#/login`
@@ -156,9 +156,8 @@ docker run -d \
 
 镜像地址：
 
-- `ghcr.io/<owner>/rust-servers:latest`
+- `ghcr.io/<owner>/rust-panel:latest`
 
 ## 许可证
 
 见 [LICENSE](file:///Users/redcarl/projects/rust-webrcon/LICENSE)。
-
