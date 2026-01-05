@@ -8,6 +8,9 @@ import PlayerPage from "@/routes/player-page";
 import PlayersPage from "@/routes/players-page";
 import ServerPage from "@/routes/server-page";
 import ServersPage from "@/routes/servers-page";
+import SettingsShell from "@/routes/settings-shell";
+import SettingsAccountsPage from "@/routes/settings-accounts-page";
+import SettingsServersPage from "@/routes/settings-servers-page";
 import { getToken } from "@/lib/auth";
 
 function RequireAuthed({ children }: { children: React.ReactNode }) {
@@ -95,6 +98,18 @@ export default function App() {
             </RequireAuthed>
           }
         />
+        <Route
+          path="/settings"
+          element={
+            <RequireAuthed>
+              <SettingsShell />
+            </RequireAuthed>
+          }
+        >
+          <Route index element={<Navigate to="accounts" replace />} />
+          <Route path="accounts" element={<SettingsAccountsPage />} />
+          <Route path="servers" element={<SettingsServersPage />} />
+        </Route>
         <Route
           element={
             <RequireAuthed>

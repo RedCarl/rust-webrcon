@@ -125,7 +125,16 @@ export default function PlayersPage() {
                       {p.DisplayName ?? "-"}
                     </Link>
                   </TableCell>
-                  <TableCell className="font-mono text-xs">{p.SteamID}</TableCell>
+                  <TableCell className="font-mono text-xs">
+                    <a
+                      className="hover:underline"
+                      href={`https://steamcommunity.com/profiles/${encodeURIComponent(p.SteamID)}/`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {p.SteamID}
+                    </a>
+                  </TableCell>
                   <TableCell>{secondsToDuration(p.ConnectedSeconds)}</TableCell>
                     <TableCell>{p.Ping ?? "-"}</TableCell>
                     <TableCell className="text-right">

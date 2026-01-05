@@ -27,7 +27,8 @@ type storedUser struct {
 
 type storedServer struct {
 	ID                 uint64    `json:"id"`
-	UserID             uint64    `json:"user_id"`
+	UserIDs            []uint64  `json:"user_ids"`
+	UserID             uint64    `json:"user_id,omitempty"`
 	Name               string    `json:"name"`
 	Alias              *string   `json:"alias,omitempty"`
 	Summary            *string   `json:"summary,omitempty"`
@@ -49,15 +50,15 @@ type storeMeta struct {
 }
 
 type jsonStore struct {
-	mu        sync.RWMutex
-	baseDir   string
-	usersDir  string
+	mu         sync.RWMutex
+	baseDir    string
+	usersDir   string
 	serversDir string
-	metaPath  string
+	metaPath   string
 
-	meta       storeMeta
-	usersByID  map[uint64]storedUser
-	usersByKey map[string]storedUser
+	meta        storeMeta
+	usersByID   map[uint64]storedUser
+	usersByKey  map[string]storedUser
 	serversByID map[uint64]storedServer
 }
 
@@ -112,7 +113,7 @@ func (s *jsonStore) migrateServersLocked() error {
 	for id, srv := range s.serversByID {
 		p := s.serverPath(id)
 		b, err := os.ReadFile(p)
-		if err == nil && bytes.Contains(b, []byte(`"last_wipe_at"`)) {
+		if err == nil && bytes.Contains(b, []byte(`"last_wipe_at"`)) && bytes.Contains(b, []byte(`"user_ids"`)) {
 			continue
 		}
 		if err := writeJSONAtomic(p, srv); err != nil {
@@ -218,12 +219,84 @@ func (s *jsonStore) loadServersLocked() error {
 		if err := json.Unmarshal(b, &srv); err != nil {
 			return err
 		}
-		if srv.ID == 0 || srv.UserID == 0 {
+		if srv.ID == 0 {
 			continue
 		}
+		if len(srv.UserIDs) == 0 {
+			if srv.UserID != 0 {
+				srv.UserIDs = []uint64{srv.UserID}
+			} else {
+				continue
+			}
+		}
+		srv.UserIDs = cleanUserIDs(srv.UserIDs)
+		if len(srv.UserIDs) == 0 {
+			continue
+		}
+		srv.UserID = 0
 		s.serversByID[srv.ID] = srv
 	}
 	return nil
+}
+
+func cleanUserIDs(ids []uint64) []uint64 {
+	if len(ids) == 0 {
+		return nil
+	}
+	m := make(map[uint64]struct{}, len(ids))
+	out := make([]uint64, 0, len(ids))
+	for _, id := range ids {
+		if id == 0 {
+			continue
+		}
+		if _, ok := m[id]; ok {
+			continue
+		}
+		m[id] = struct{}{}
+		out = append(out, id)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func serverHasUser(srv *storedServer, userID uint64) bool {
+	for _, id := range srv.UserIDs {
+		if id == userID {
+			return true
+		}
+	}
+	return false
+}
+
+func serverAddUser(srv *storedServer, userID uint64) {
+	if userID == 0 {
+		return
+	}
+	if serverHasUser(srv, userID) {
+		return
+	}
+	srv.UserIDs = append(srv.UserIDs, userID)
+	srv.UserIDs = cleanUserIDs(srv.UserIDs)
+}
+
+func serverRemoveUser(srv *storedServer, userID uint64) {
+	if len(srv.UserIDs) == 0 {
+		return
+	}
+	dst := srv.UserIDs[:0]
+	for _, id := range srv.UserIDs {
+		if id != userID {
+			dst = append(dst, id)
+		}
+	}
+	if len(dst) == 0 {
+		srv.UserIDs = nil
+	} else {
+		srv.UserIDs = cleanUserIDs(dst)
+	}
 }
 
 func (s *jsonStore) repairLocked() {
@@ -340,7 +413,7 @@ func (s *jsonStore) ListServersByUserID(userID uint64) []storedServer {
 	defer s.mu.RUnlock()
 	out := make([]storedServer, 0)
 	for _, srv := range s.serversByID {
-		if srv.UserID == userID {
+		if serverHasUser(&srv, userID) {
 			out = append(out, srv)
 		}
 	}
@@ -348,14 +421,20 @@ func (s *jsonStore) ListServersByUserID(userID uint64) []storedServer {
 	return out
 }
 
-func (s *jsonStore) CreateServer(userID uint64, name, host string, port uint16, rconPasswordCipher string, containerName *string) (storedServer, error) {
+func (s *jsonStore) CreateServer(userIDs []uint64, name, host string, port uint16, rconPasswordCipher string, containerName *string) (storedServer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	userIDs = cleanUserIDs(userIDs)
+	if len(userIDs) == 0 {
+		return storedServer{}, errors.New("missing user ids")
+	}
 
 	now := time.Now()
 	srv := storedServer{
 		ID:                 s.meta.NextServerID,
-		UserID:             userID,
+		UserID:             0,
+		UserIDs:            userIDs,
 		Name:               name,
 		Host:               host,
 		Port:               port,
@@ -380,7 +459,7 @@ func (s *jsonStore) FindServerByID(userID, id uint64) (*storedServer, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	srv, ok := s.serversByID[id]
-	if !ok || srv.UserID != userID {
+	if !ok || !serverHasUser(&srv, userID) {
 		return nil, false
 	}
 	out := srv
@@ -402,7 +481,7 @@ func (s *jsonStore) UpdateServer(userID, id uint64, apply func(*storedServer) er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur, ok := s.serversByID[id]
-	if !ok || cur.UserID != userID {
+	if !ok || !serverHasUser(&cur, userID) {
 		return storedServer{}, os.ErrNotExist
 	}
 
@@ -422,7 +501,72 @@ func (s *jsonStore) DeleteServer(userID, id uint64) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	srv, ok := s.serversByID[id]
-	if !ok || srv.UserID != userID {
+	if !ok || !serverHasUser(&srv, userID) {
+		return false, nil
+	}
+	if len(srv.UserIDs) > 1 {
+		next := srv
+		serverRemoveUser(&next, userID)
+		next.UpdatedAt = time.Now()
+		if err := writeJSONAtomic(s.serverPath(next.ID), next); err != nil {
+			return false, err
+		}
+		s.serversByID[id] = next
+		return true, nil
+	}
+	if err := os.Remove(s.serverPath(id)); err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	delete(s.serversByID, id)
+	return true, nil
+}
+
+func (s *jsonStore) ListUsers() []storedUser {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]storedUser, 0, len(s.usersByID))
+	for _, u := range s.usersByID {
+		out = append(out, u)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+func (s *jsonStore) ListServersAny() []storedServer {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]storedServer, 0, len(s.serversByID))
+	for _, srv := range s.serversByID {
+		out = append(out, srv)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	return out
+}
+
+func (s *jsonStore) UpdateServerAny(id uint64, apply func(*storedServer) error) (storedServer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.serversByID[id]
+	if !ok {
+		return storedServer{}, os.ErrNotExist
+	}
+
+	next := cur
+	if err := apply(&next); err != nil {
+		return storedServer{}, err
+	}
+	next.UpdatedAt = time.Now()
+	if err := writeJSONAtomic(s.serverPath(next.ID), next); err != nil {
+		return storedServer{}, err
+	}
+	s.serversByID[id] = next
+	return next, nil
+}
+
+func (s *jsonStore) DeleteServerAny(id uint64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.serversByID[id]; !ok {
 		return false, nil
 	}
 	if err := os.Remove(s.serverPath(id)); err != nil && !os.IsNotExist(err) {

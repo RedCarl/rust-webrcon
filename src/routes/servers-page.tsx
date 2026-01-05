@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useNavigate } from "react-router-dom";
-import { LogOut, Moon, Sun } from "lucide-react";
+import { LogOut, Moon, Sun, Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -42,14 +42,14 @@ export default function ServersPage() {
   const [createOpen, setCreateOpen] = React.useState(false);
   const [createName, setCreateName] = React.useState("");
   const [createHost, setCreateHost] = React.useState("");
-  const [createPort, setCreatePort] = React.useState(28016);
+  const [createPort, setCreatePort] = React.useState("28016");
   const [createPassword, setCreatePassword] = React.useState("");
   const [createContainerName, setCreateContainerName] = React.useState("");
 
   const [editing, setEditing] = React.useState<ServerDto | null>(null);
   const [editName, setEditName] = React.useState("");
   const [editHost, setEditHost] = React.useState("");
-  const [editPort, setEditPort] = React.useState(28016);
+  const [editPort, setEditPort] = React.useState("28016");
   const [editPassword, setEditPassword] = React.useState("");
   const [editContainerName, setEditContainerName] = React.useState("");
 
@@ -103,6 +103,16 @@ export default function ServersPage() {
             <Button
               variant="secondary"
               size="icon"
+              aria-label="系统设置"
+              onClick={() => {
+                navigate("/settings");
+              }}
+            >
+              <Settings className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="secondary"
+              size="icon"
               aria-label="退出登录"
               onClick={() => {
                 clearToken();
@@ -151,25 +161,26 @@ export default function ServersPage() {
                   </TableHeader>
                   <TableBody>
                     {servers.map((s) => (
-                      <TableRow key={s.id}>
-                        <TableCell className="font-medium">{s.name}</TableCell>
-                        <TableCell className="font-mono text-xs">{s.host}</TableCell>
-                        <TableCell className="font-mono text-xs">{s.port}</TableCell>
-                        <TableCell className="font-mono text-xs">{s.container_name ?? "-"}</TableCell>
-                        <TableCell className="text-right">
-                          <div className="flex justify-end gap-2">
-                            <Button
-                              size="sm"
-                              onClick={() => {
-                                try {
-                                  localStorage.setItem("rustpanel-current-server-id", String(s.id));
-                                } catch {}
-                                setPendingConnection(`${s.host}:${s.port}`, s.rcon_password);
-                                navigate(`/server/${s.id}`);
-                              }}
-                            >
-                              管理
-                            </Button>
+                        <TableRow key={s.id}>
+                          <TableCell className="font-medium">{s.name}</TableCell>
+                          <TableCell className="font-mono text-xs">{s.host}</TableCell>
+                          <TableCell className="font-mono text-xs">{s.port ? s.port : "-"}</TableCell>
+                          <TableCell className="font-mono text-xs">{s.container_name ?? "-"}</TableCell>
+                          <TableCell className="text-right">
+                            <div className="flex justify-end gap-2">
+                              <Button
+                                size="sm"
+                                onClick={() => {
+                                  try {
+                                    localStorage.setItem("rustpanel-current-server-id", String(s.id));
+                                  } catch {}
+                                  const addr = s.port ? `${s.host}:${s.port}` : s.host;
+                                  setPendingConnection(addr, s.rcon_password);
+                                  navigate(`/server/${s.id}`);
+                                }}
+                              >
+                                管理
+                              </Button>
                         <Button
                           size="sm"
                           variant="secondary"
@@ -177,7 +188,7 @@ export default function ServersPage() {
                             setEditing(s);
                             setEditName(s.name);
                             setEditHost(s.host);
-                            setEditPort(s.port);
+                            setEditPort(s.port ? String(s.port) : "");
                             setEditPassword(s.rcon_password);
                             setEditContainerName(s.container_name ?? "");
                           }}
@@ -277,7 +288,9 @@ export default function ServersPage() {
           </DialogHeader>
           <div className="grid gap-4 md:grid-cols-2">
             <div className="grid gap-2 md:col-span-2">
-              <div className="text-sm text-muted-foreground">地址/端口用于 WebSocket RCON（例：127.0.0.1:28016）</div>
+              <div className="text-sm text-muted-foreground">
+                地址/端口用于 WebSocket RCON（例：127.0.0.1:28016；只有域名时端口可留空）
+              </div>
             </div>
             <div className="grid gap-2">
               <Label htmlFor="create-name">名称</Label>
@@ -293,7 +306,7 @@ export default function ServersPage() {
                 id="create-port"
                 type="number"
                 value={createPort}
-                onChange={(e) => setCreatePort(Number(e.target.value))}
+                onChange={(e) => setCreatePort(e.target.value)}
               />
             </div>
             <div className="grid gap-2">
@@ -329,6 +342,8 @@ export default function ServersPage() {
                 const name = createName.trim();
                 const host = createHost.trim();
                 const pw = createPassword.trim();
+                const portText = createPort.trim();
+                const port = portText ? Number(portText) : 0;
                 if (!name) {
                   toast.error("服务器名称不能为空");
                   return;
@@ -341,20 +356,24 @@ export default function ServersPage() {
                   toast.error("RCON 密码不能为空");
                   return;
                 }
+                if (portText && (!Number.isFinite(port) || !Number.isInteger(port) || port < 0 || port > 65535)) {
+                  toast.error("端口不合法");
+                  return;
+                }
                 try {
                   await apiJson<ServerDto>("/api/servers", {
                     method: "POST",
                     body: JSON.stringify({
                       name,
                       host,
-                      port: createPort,
+                      port,
                       rcon_password: pw,
                       container_name: createContainerName.trim() ? createContainerName.trim() : null,
                     }),
                   });
                   setCreateName("");
                   setCreateHost("");
-                  setCreatePort(28016);
+                  setCreatePort("28016");
                   setCreatePassword("");
                   setCreateContainerName("");
                   setCreateOpen(false);
@@ -395,7 +414,7 @@ export default function ServersPage() {
                 id="edit-port"
                 type="number"
                 value={editPort}
-                onChange={(e) => setEditPort(Number(e.target.value))}
+                onChange={(e) => setEditPort(e.target.value)}
               />
             </div>
             <div className="grid gap-2">
@@ -428,13 +447,19 @@ export default function ServersPage() {
             <Button
               onClick={async () => {
                 if (!editing) return;
+                const portText = editPort.trim();
+                const port = portText ? Number(portText) : 0;
+                if (portText && (!Number.isFinite(port) || !Number.isInteger(port) || port < 0 || port > 65535)) {
+                  toast.error("端口不合法");
+                  return;
+                }
                 try {
                   await apiJson<ServerDto>(`/api/servers/${editing.id}`, {
                     method: "PUT",
                     body: JSON.stringify({
                       name: editName,
                       host: editHost,
-                      port: editPort,
+                      port,
                       rcon_password: editPassword,
                       container_name: editContainerName.trim() ? editContainerName.trim() : null,
                     }),

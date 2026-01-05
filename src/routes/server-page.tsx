@@ -173,7 +173,8 @@ export default function ServerPage() {
         try {
           localStorage.setItem("rustpanel-current-server-id", String(server.id));
         } catch {}
-        connect(`${server.host}:${server.port}`, server.rcon_password);
+        const addr = server.port ? `${server.host}:${server.port}` : server.host;
+        connect(addr, server.rcon_password);
       } catch (e) {
         const msg = e instanceof Error ? e.message : "加载服务器失败";
         toast.error(msg);

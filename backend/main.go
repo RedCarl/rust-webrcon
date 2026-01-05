@@ -128,6 +128,20 @@ func main() {
 			protected.PUT("/servers/:id", state.ginUpdateServer)
 			protected.DELETE("/servers/:id", state.ginDeleteServer)
 			protected.POST("/servers/:id/actions/:action", state.ginServerAction)
+
+			admin := protected.Group("/admin")
+			admin.Use(state.ginAdminRequired())
+			{
+				admin.GET("/users", state.ginAdminListUsers)
+				admin.POST("/users", state.ginAdminCreateUser)
+				admin.PUT("/users/:id/password", state.ginAdminUpdateUserPassword)
+				admin.PUT("/users/:id/servers", state.ginAdminAssignUserServers)
+
+				admin.GET("/servers", state.ginAdminListServers)
+				admin.POST("/servers", state.ginAdminCreateServer)
+				admin.PUT("/servers/:id", state.ginAdminUpdateServer)
+				admin.DELETE("/servers/:id", state.ginAdminDeleteServer)
+			}
 		}
 	}
 
@@ -479,7 +493,7 @@ func (s *appState) ginCreateServer(c *gin.Context) {
 		return
 	}
 
-	srv, err := s.store.CreateServer(userID, name, host, req.Port, cipherText, containerName)
+	srv, err := s.store.CreateServer([]uint64{userID}, name, host, req.Port, cipherText, containerName)
 	if err != nil {
 		c.JSON(500, apiErrorBody{Message: "创建服务器失败"})
 		return
@@ -599,6 +613,413 @@ func (s *appState) ginDeleteServer(c *gin.Context) {
 	c.Status(204)
 }
 
+type adminUserDTO struct {
+	ID        uint64    `json:"id"`
+	Username  string    `json:"username"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func (s *appState) ginAdminListUsers(c *gin.Context) {
+	list := s.store.ListUsers()
+	out := make([]adminUserDTO, 0, len(list))
+	for _, u := range list {
+		out = append(out, adminUserDTO{ID: u.ID, Username: u.Username, CreatedAt: u.CreatedAt})
+	}
+	c.JSON(200, out)
+}
+
+type adminCreateUserRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+func (s *appState) ginAdminCreateUser(c *gin.Context) {
+	var req adminCreateUserRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, apiErrorBody{Message: "请求格式错误"})
+		return
+	}
+	username := strings.TrimSpace(req.Username)
+	password := strings.TrimSpace(req.Password)
+	if username == "" {
+		c.JSON(400, apiErrorBody{Message: "用户名不能为空"})
+		return
+	}
+	if len(password) < 6 {
+		c.JSON(400, apiErrorBody{Message: "密码至少 6 位"})
+		return
+	}
+
+	hash, err := hashPassword(password)
+	if err != nil {
+		c.JSON(500, apiErrorBody{Message: "生成密码哈希失败"})
+		return
+	}
+
+	u, err := s.store.CreateUser(username, hash)
+	if err != nil {
+		if errors.Is(err, errUserExists) {
+			c.JSON(409, apiErrorBody{Message: "用户名已存在"})
+			return
+		}
+		if err.Error() == "invalid username" {
+			c.JSON(400, apiErrorBody{Message: "用户名格式不合法"})
+			return
+		}
+		c.JSON(500, apiErrorBody{Message: "创建用户失败"})
+		return
+	}
+	c.JSON(200, adminUserDTO{ID: u.ID, Username: u.Username, CreatedAt: u.CreatedAt})
+}
+
+type adminUpdateUserPasswordRequest struct {
+	Password string `json:"password"`
+}
+
+func (s *appState) ginAdminUpdateUserPassword(c *gin.Context) {
+	id, err := parseUint64Param(c, "id")
+	if err != nil {
+		c.JSON(404, apiErrorBody{Message: "资源不存在"})
+		return
+	}
+	u, ok := s.store.FindUserByID(id)
+	if !ok {
+		c.JSON(404, apiErrorBody{Message: "资源不存在"})
+		return
+	}
+
+	var req adminUpdateUserPasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, apiErrorBody{Message: "请求格式错误"})
+		return
+	}
+	password := strings.TrimSpace(req.Password)
+	if len(password) < 6 {
+		c.JSON(400, apiErrorBody{Message: "密码至少 6 位"})
+		return
+	}
+	hash, err := hashPassword(password)
+	if err != nil {
+		c.JSON(500, apiErrorBody{Message: "生成密码哈希失败"})
+		return
+	}
+	if err := s.store.UpdateUserPasswordHash(u.Username, hash); err != nil {
+		c.JSON(500, apiErrorBody{Message: "修改失败"})
+		return
+	}
+	c.Status(204)
+}
+
+type adminAssignUserServersRequest struct {
+	ServerIDs []uint64 `json:"server_ids"`
+}
+
+func (s *appState) ginAdminAssignUserServers(c *gin.Context) {
+	userID, err := parseUint64Param(c, "id")
+	if err != nil {
+		c.JSON(404, apiErrorBody{Message: "资源不存在"})
+		return
+	}
+	if _, ok := s.store.FindUserByID(userID); !ok {
+		c.JSON(404, apiErrorBody{Message: "资源不存在"})
+		return
+	}
+	systemUser, ok := s.store.FindUserByUsername("system")
+	if !ok {
+		c.JSON(500, apiErrorBody{Message: "系统账号不存在"})
+		return
+	}
+
+	var req adminAssignUserServersRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, apiErrorBody{Message: "请求格式错误"})
+		return
+	}
+
+	want := make(map[uint64]struct{}, len(req.ServerIDs))
+	for _, id := range req.ServerIDs {
+		if id == 0 {
+			continue
+		}
+		if _, exists := want[id]; exists {
+			continue
+		}
+		if _, found := s.store.FindServerByIDAny(id); !found {
+			c.JSON(400, apiErrorBody{Message: "服务器不存在"})
+			return
+		}
+		want[id] = struct{}{}
+	}
+
+	current := s.store.ListServersByUserID(userID)
+	for _, srv := range current {
+		if _, keep := want[srv.ID]; keep {
+			continue
+		}
+		_, err := s.store.UpdateServerAny(srv.ID, func(srv *storedServer) error {
+			serverRemoveUser(srv, userID)
+			if len(srv.UserIDs) == 0 {
+				srv.UserIDs = []uint64{systemUser.ID}
+			}
+			srv.UserID = 0
+			return nil
+		})
+		if err != nil {
+			c.JSON(500, apiErrorBody{Message: "分配失败"})
+			return
+		}
+	}
+
+	for srvID := range want {
+		_, err := s.store.UpdateServerAny(srvID, func(srv *storedServer) error {
+			if userID != systemUser.ID && len(srv.UserIDs) == 1 && srv.UserIDs[0] == systemUser.ID {
+				srv.UserIDs = nil
+			}
+			serverAddUser(srv, userID)
+			srv.UserID = 0
+			return nil
+		})
+		if err != nil {
+			c.JSON(500, apiErrorBody{Message: "分配失败"})
+			return
+		}
+	}
+
+	c.Status(204)
+}
+
+type adminServerDTO struct {
+	ID            uint64   `json:"id"`
+	UserIDs       []uint64 `json:"user_ids"`
+	Name          string   `json:"name"`
+	Host          string   `json:"host"`
+	Port          uint16   `json:"port"`
+	RconPassword  string   `json:"rcon_password"`
+	ContainerName *string  `json:"container_name"`
+}
+
+func (s *appState) ginAdminListServers(c *gin.Context) {
+	servers := s.store.ListServersAny()
+	out := make([]adminServerDTO, 0, len(servers))
+	for _, srv := range servers {
+		pw, err := s.decryptRconPassword(srv.RconPasswordCipher)
+		if err != nil {
+			c.JSON(500, apiErrorBody{Message: "查询服务器失败"})
+			return
+		}
+		out = append(out, adminServerDTO{
+			ID:            srv.ID,
+			UserIDs:       srv.UserIDs,
+			Name:          srv.Name,
+			Host:          srv.Host,
+			Port:          srv.Port,
+			RconPassword:  pw,
+			ContainerName: srv.ContainerName,
+		})
+	}
+	c.JSON(200, out)
+}
+
+type adminCreateServerRequest struct {
+	UserID        uint64   `json:"user_id"`
+	UserIDs       []uint64 `json:"user_ids"`
+	Name          string   `json:"name"`
+	Host          string   `json:"host"`
+	Port          uint16   `json:"port"`
+	RconPassword  string   `json:"rcon_password"`
+	ContainerName *string  `json:"container_name"`
+}
+
+func (s *appState) ginAdminCreateServer(c *gin.Context) {
+	var req adminCreateServerRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, apiErrorBody{Message: "请求格式错误"})
+		return
+	}
+	userIDs := req.UserIDs
+	if len(userIDs) == 0 && req.UserID != 0 {
+		userIDs = []uint64{req.UserID}
+	}
+	userIDs = cleanUserIDs(userIDs)
+	if len(userIDs) == 0 {
+		c.JSON(400, apiErrorBody{Message: "所属账号不能为空"})
+		return
+	}
+	for _, uid := range userIDs {
+		if _, ok := s.store.FindUserByID(uid); !ok {
+			c.JSON(400, apiErrorBody{Message: "所属账号不存在"})
+			return
+		}
+	}
+	name := strings.TrimSpace(req.Name)
+	host := strings.TrimSpace(req.Host)
+	pw := strings.TrimSpace(req.RconPassword)
+	if name == "" {
+		c.JSON(400, apiErrorBody{Message: "服务器名称不能为空"})
+		return
+	}
+	if host == "" {
+		c.JSON(400, apiErrorBody{Message: "服务器地址不能为空"})
+		return
+	}
+	if pw == "" {
+		c.JSON(400, apiErrorBody{Message: "RCON 密码不能为空"})
+		return
+	}
+	containerName := normalizeOptionalString(req.ContainerName)
+
+	cipherText, err := s.encryptRconPassword(pw)
+	if err != nil {
+		c.JSON(500, apiErrorBody{Message: "创建服务器失败"})
+		return
+	}
+
+	srv, err := s.store.CreateServer(userIDs, name, host, req.Port, cipherText, containerName)
+	if err != nil {
+		c.JSON(500, apiErrorBody{Message: "创建服务器失败"})
+		return
+	}
+
+	c.JSON(200, adminServerDTO{
+		ID:            srv.ID,
+		UserIDs:       srv.UserIDs,
+		Name:          srv.Name,
+		Host:          srv.Host,
+		Port:          srv.Port,
+		RconPassword:  pw,
+		ContainerName: srv.ContainerName,
+	})
+}
+
+type adminUpdateServerRequest struct {
+	UserID        *uint64   `json:"user_id"`
+	UserIDs       *[]uint64 `json:"user_ids"`
+	Name          *string   `json:"name"`
+	Host          *string   `json:"host"`
+	Port          *uint16   `json:"port"`
+	RconPassword  *string   `json:"rcon_password"`
+	ContainerName *string   `json:"container_name"`
+}
+
+func (s *appState) ginAdminUpdateServer(c *gin.Context) {
+	id, err := parseUint64Param(c, "id")
+	if err != nil {
+		c.JSON(404, apiErrorBody{Message: "资源不存在"})
+		return
+	}
+
+	var req adminUpdateServerRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, apiErrorBody{Message: "请求格式错误"})
+		return
+	}
+
+	updated, err := s.store.UpdateServerAny(id, func(srv *storedServer) error {
+		if req.UserIDs != nil {
+			userIDs := cleanUserIDs(*req.UserIDs)
+			if len(userIDs) == 0 {
+				return errors.New("所属账号不能为空")
+			}
+			for _, uid := range userIDs {
+				if _, ok := s.store.FindUserByID(uid); !ok {
+					return errors.New("所属账号不存在")
+				}
+			}
+			srv.UserIDs = userIDs
+			srv.UserID = 0
+		} else if req.UserID != nil {
+			if *req.UserID == 0 {
+				return errors.New("所属账号不能为空")
+			}
+			if _, ok := s.store.FindUserByID(*req.UserID); !ok {
+				return errors.New("所属账号不存在")
+			}
+			srv.UserIDs = []uint64{*req.UserID}
+			srv.UserID = 0
+		}
+		if req.Name != nil {
+			v := strings.TrimSpace(*req.Name)
+			if v == "" {
+				return errors.New("服务器名称不能为空")
+			}
+			srv.Name = v
+		}
+		if req.Host != nil {
+			v := strings.TrimSpace(*req.Host)
+			if v == "" {
+				return errors.New("服务器地址不能为空")
+			}
+			srv.Host = v
+		}
+		if req.Port != nil {
+			srv.Port = *req.Port
+		}
+		if req.RconPassword != nil {
+			v := strings.TrimSpace(*req.RconPassword)
+			if v == "" {
+				return errors.New("RCON 密码不能为空")
+			}
+			cipherText, err := s.encryptRconPassword(v)
+			if err != nil {
+				return err
+			}
+			srv.RconPasswordCipher = cipherText
+		}
+		if req.ContainerName != nil {
+			srv.ContainerName = normalizeOptionalString(req.ContainerName)
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			c.JSON(404, apiErrorBody{Message: "资源不存在"})
+			return
+		}
+		switch err.Error() {
+		case "所属账号不能为空", "所属账号不存在", "服务器名称不能为空", "服务器地址不能为空", "RCON 密码不能为空":
+			c.JSON(400, apiErrorBody{Message: err.Error()})
+			return
+		default:
+			c.JSON(500, apiErrorBody{Message: "更新服务器失败"})
+			return
+		}
+	}
+
+	pw, err := s.decryptRconPassword(updated.RconPasswordCipher)
+	if err != nil {
+		c.JSON(500, apiErrorBody{Message: "更新服务器失败"})
+		return
+	}
+
+	c.JSON(200, adminServerDTO{
+		ID:            updated.ID,
+		UserIDs:       updated.UserIDs,
+		Name:          updated.Name,
+		Host:          updated.Host,
+		Port:          updated.Port,
+		RconPassword:  pw,
+		ContainerName: updated.ContainerName,
+	})
+}
+
+func (s *appState) ginAdminDeleteServer(c *gin.Context) {
+	id, err := parseUint64Param(c, "id")
+	if err != nil {
+		c.JSON(404, apiErrorBody{Message: "资源不存在"})
+		return
+	}
+	ok, err := s.store.DeleteServerAny(id)
+	if err != nil {
+		c.JSON(500, apiErrorBody{Message: "删除服务器失败"})
+		return
+	}
+	if !ok {
+		c.JSON(404, apiErrorBody{Message: "资源不存在"})
+		return
+	}
+	c.Status(204)
+}
+
 func (s *appState) ginGetServerLastWipe(c *gin.Context) {
 	id, err := parseUint64Param(c, "id")
 	if err != nil {
@@ -635,6 +1056,19 @@ func (s *appState) ginAuthRequired() gin.HandlerFunc {
 			return
 		}
 		c.Set("userID", userID)
+		c.Next()
+	}
+}
+
+func (s *appState) ginAdminRequired() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := mustUserID(c)
+		u, ok := s.store.FindUserByID(userID)
+		if !ok || strings.TrimSpace(u.Username) != "system" {
+			c.JSON(403, apiErrorBody{Message: "无权限"})
+			c.Abort()
+			return
+		}
 		c.Next()
 	}
 }
