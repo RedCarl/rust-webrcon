@@ -9,7 +9,7 @@ CONFIG_PATH="${CONFIG:-../config.json}"
 
 if [[ ! -f "$BIN" ]]; then
   echo "未找到可执行文件：$BIN"
-  echo "请先编译：go build -o \"$BIN\" ."
+  echo "请先编译：go build -o \"$BIN\" ./cmd/server"
   exit 1
 fi
 if [[ ! -x "$BIN" ]]; then

@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"bytes"
@@ -14,18 +14,18 @@ import (
 	"time"
 )
 
-var errUserExists = errors.New("user exists")
+var ErrUserExists = errors.New("user exists")
 
 var usernameFileRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
-type storedUser struct {
+type User struct {
 	ID           uint64    `json:"id"`
 	Username     string    `json:"username"`
 	PasswordHash string    `json:"password_hash"`
 	CreatedAt    time.Time `json:"created_at"`
 }
 
-type storedServer struct {
+type Server struct {
 	ID                 uint64    `json:"id"`
 	UserIDs            []uint64  `json:"user_ids"`
 	UserID             uint64    `json:"user_id,omitempty"`
@@ -49,7 +49,7 @@ type storeMeta struct {
 	NextServerID uint64 `json:"next_server_id"`
 }
 
-type jsonStore struct {
+type JSONStore struct {
 	mu         sync.RWMutex
 	baseDir    string
 	usersDir   string
@@ -57,12 +57,12 @@ type jsonStore struct {
 	metaPath   string
 
 	meta        storeMeta
-	usersByID   map[uint64]storedUser
-	usersByKey  map[string]storedUser
-	serversByID map[uint64]storedServer
+	usersByID   map[uint64]User
+	usersByKey  map[string]User
+	serversByID map[uint64]Server
 }
 
-func openJSONStore(baseDir string) (*jsonStore, error) {
+func OpenJSONStore(baseDir string) (*JSONStore, error) {
 	base := filepath.Clean(baseDir)
 	usersDir := filepath.Join(base, "users")
 	serversDir := filepath.Join(base, "servers")
@@ -75,7 +75,7 @@ func openJSONStore(baseDir string) (*jsonStore, error) {
 		return nil, err
 	}
 
-	s := &jsonStore{
+	s := &JSONStore{
 		baseDir:    base,
 		usersDir:   usersDir,
 		serversDir: serversDir,
@@ -85,9 +85,9 @@ func openJSONStore(baseDir string) (*jsonStore, error) {
 			NextUserID:   1,
 			NextServerID: 1,
 		},
-		usersByID:   make(map[uint64]storedUser),
-		usersByKey:  make(map[string]storedUser),
-		serversByID: make(map[uint64]storedServer),
+		usersByID:   make(map[uint64]User),
+		usersByKey:  make(map[string]User),
+		serversByID: make(map[uint64]Server),
 	}
 
 	if err := s.loadMetaLocked(); err != nil {
@@ -109,7 +109,7 @@ func openJSONStore(baseDir string) (*jsonStore, error) {
 	return s, nil
 }
 
-func (s *jsonStore) migrateServersLocked() error {
+func (s *JSONStore) migrateServersLocked() error {
 	for id, srv := range s.serversByID {
 		p := s.serverPath(id)
 		b, err := os.ReadFile(p)
@@ -123,7 +123,7 @@ func (s *jsonStore) migrateServersLocked() error {
 	return nil
 }
 
-func (s *jsonStore) loadMetaLocked() error {
+func (s *JSONStore) loadMetaLocked() error {
 	b, err := os.ReadFile(s.metaPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -149,7 +149,7 @@ func (s *jsonStore) loadMetaLocked() error {
 	return nil
 }
 
-func (s *jsonStore) persistMetaLocked() error {
+func (s *JSONStore) persistMetaLocked() error {
 	b, err := json.MarshalIndent(s.meta, "", "  ")
 	if err != nil {
 		return err
@@ -161,7 +161,7 @@ func (s *jsonStore) persistMetaLocked() error {
 	return os.Rename(tmp, s.metaPath)
 }
 
-func (s *jsonStore) loadUsersLocked() error {
+func (s *JSONStore) loadUsersLocked() error {
 	entries, err := os.ReadDir(s.usersDir)
 	if err != nil {
 		return err
@@ -181,7 +181,7 @@ func (s *jsonStore) loadUsersLocked() error {
 		if len(bytes.TrimSpace(b)) == 0 {
 			continue
 		}
-		var u storedUser
+		var u User
 		if err := json.Unmarshal(b, &u); err != nil {
 			return err
 		}
@@ -195,7 +195,7 @@ func (s *jsonStore) loadUsersLocked() error {
 	return nil
 }
 
-func (s *jsonStore) loadServersLocked() error {
+func (s *JSONStore) loadServersLocked() error {
 	entries, err := os.ReadDir(s.serversDir)
 	if err != nil {
 		return err
@@ -215,7 +215,7 @@ func (s *jsonStore) loadServersLocked() error {
 		if len(bytes.TrimSpace(b)) == 0 {
 			continue
 		}
-		var srv storedServer
+		var srv Server
 		if err := json.Unmarshal(b, &srv); err != nil {
 			return err
 		}
@@ -229,7 +229,7 @@ func (s *jsonStore) loadServersLocked() error {
 				continue
 			}
 		}
-		srv.UserIDs = cleanUserIDs(srv.UserIDs)
+		srv.UserIDs = CleanUserIDs(srv.UserIDs)
 		if len(srv.UserIDs) == 0 {
 			continue
 		}
@@ -239,7 +239,7 @@ func (s *jsonStore) loadServersLocked() error {
 	return nil
 }
 
-func cleanUserIDs(ids []uint64) []uint64 {
+func CleanUserIDs(ids []uint64) []uint64 {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -262,7 +262,7 @@ func cleanUserIDs(ids []uint64) []uint64 {
 	return out
 }
 
-func serverHasUser(srv *storedServer, userID uint64) bool {
+func serverHasUser(srv *Server, userID uint64) bool {
 	for _, id := range srv.UserIDs {
 		if id == userID {
 			return true
@@ -271,35 +271,7 @@ func serverHasUser(srv *storedServer, userID uint64) bool {
 	return false
 }
 
-func serverAddUser(srv *storedServer, userID uint64) {
-	if userID == 0 {
-		return
-	}
-	if serverHasUser(srv, userID) {
-		return
-	}
-	srv.UserIDs = append(srv.UserIDs, userID)
-	srv.UserIDs = cleanUserIDs(srv.UserIDs)
-}
-
-func serverRemoveUser(srv *storedServer, userID uint64) {
-	if len(srv.UserIDs) == 0 {
-		return
-	}
-	dst := srv.UserIDs[:0]
-	for _, id := range srv.UserIDs {
-		if id != userID {
-			dst = append(dst, id)
-		}
-	}
-	if len(dst) == 0 {
-		srv.UserIDs = nil
-	} else {
-		srv.UserIDs = cleanUserIDs(dst)
-	}
-}
-
-func (s *jsonStore) repairLocked() {
+func (s *JSONStore) repairLocked() {
 	var maxUserID uint64
 	for id := range s.usersByID {
 		if id > maxUserID {
@@ -321,11 +293,11 @@ func (s *jsonStore) repairLocked() {
 	}
 }
 
-func (s *jsonStore) userPath(username string) string {
+func (s *JSONStore) userPath(username string) string {
 	return filepath.Join(s.usersDir, username+".json")
 }
 
-func (s *jsonStore) serverPath(id uint64) string {
+func (s *JSONStore) serverPath(id uint64) string {
 	return filepath.Join(s.serversDir, fmt.Sprintf("%d.json", id))
 }
 
@@ -341,17 +313,17 @@ func writeJSONAtomic(path string, v any) error {
 	return os.Rename(tmp, path)
 }
 
-func (s *jsonStore) CreateUser(username, passwordHash string) (storedUser, error) {
+func (s *JSONStore) CreateUser(username, passwordHash string) (User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if !usernameFileRe.MatchString(username) {
-		return storedUser{}, errors.New("invalid username")
+		return User{}, errors.New("invalid username")
 	}
 	if _, ok := s.usersByKey[username]; ok {
-		return storedUser{}, errUserExists
+		return User{}, ErrUserExists
 	}
-	u := storedUser{
+	u := User{
 		ID:           s.meta.NextUserID,
 		Username:     username,
 		PasswordHash: passwordHash,
@@ -359,17 +331,17 @@ func (s *jsonStore) CreateUser(username, passwordHash string) (storedUser, error
 	}
 	s.meta.NextUserID++
 	if err := writeJSONAtomic(s.userPath(username), u); err != nil {
-		return storedUser{}, err
+		return User{}, err
 	}
 	s.usersByID[u.ID] = u
 	s.usersByKey[username] = u
 	if err := s.persistMetaLocked(); err != nil {
-		return storedUser{}, err
+		return User{}, err
 	}
 	return u, nil
 }
 
-func (s *jsonStore) FindUserByUsername(username string) (*storedUser, bool) {
+func (s *JSONStore) FindUserByUsername(username string) (*User, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	u, ok := s.usersByKey[username]
@@ -380,7 +352,7 @@ func (s *jsonStore) FindUserByUsername(username string) (*storedUser, bool) {
 	return &out, true
 }
 
-func (s *jsonStore) FindUserByID(id uint64) (*storedUser, bool) {
+func (s *JSONStore) FindUserByID(id uint64) (*User, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	u, ok := s.usersByID[id]
@@ -391,7 +363,7 @@ func (s *jsonStore) FindUserByID(id uint64) (*storedUser, bool) {
 	return &out, true
 }
 
-func (s *jsonStore) UpdateUserPasswordHash(username, passwordHash string) error {
+func (s *JSONStore) UpdateUserPasswordHash(username, passwordHash string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -408,10 +380,10 @@ func (s *jsonStore) UpdateUserPasswordHash(username, passwordHash string) error 
 	return nil
 }
 
-func (s *jsonStore) ListServersByUserID(userID uint64) []storedServer {
+func (s *JSONStore) ListServersByUserID(userID uint64) []Server {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]storedServer, 0)
+	out := make([]Server, 0)
 	for _, srv := range s.serversByID {
 		if serverHasUser(&srv, userID) {
 			out = append(out, srv)
@@ -421,17 +393,17 @@ func (s *jsonStore) ListServersByUserID(userID uint64) []storedServer {
 	return out
 }
 
-func (s *jsonStore) CreateServer(userIDs []uint64, name, host string, port uint16, rconPasswordCipher string, containerName *string) (storedServer, error) {
+func (s *JSONStore) CreateServer(userIDs []uint64, name, host string, port uint16, rconPasswordCipher string, containerName *string) (Server, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	userIDs = cleanUserIDs(userIDs)
+	userIDs = CleanUserIDs(userIDs)
 	if len(userIDs) == 0 {
-		return storedServer{}, errors.New("missing user ids")
+		return Server{}, errors.New("missing user ids")
 	}
 
 	now := time.Now()
-	srv := storedServer{
+	srv := Server{
 		ID:                 s.meta.NextServerID,
 		UserID:             0,
 		UserIDs:            userIDs,
@@ -446,16 +418,16 @@ func (s *jsonStore) CreateServer(userIDs []uint64, name, host string, port uint1
 	}
 	s.meta.NextServerID++
 	if err := writeJSONAtomic(s.serverPath(srv.ID), srv); err != nil {
-		return storedServer{}, err
+		return Server{}, err
 	}
 	s.serversByID[srv.ID] = srv
 	if err := s.persistMetaLocked(); err != nil {
-		return storedServer{}, err
+		return Server{}, err
 	}
 	return srv, nil
 }
 
-func (s *jsonStore) FindServerByID(userID, id uint64) (*storedServer, bool) {
+func (s *JSONStore) FindServerByID(userID, id uint64) (*Server, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	srv, ok := s.serversByID[id]
@@ -466,7 +438,7 @@ func (s *jsonStore) FindServerByID(userID, id uint64) (*storedServer, bool) {
 	return &out, true
 }
 
-func (s *jsonStore) FindServerByIDAny(id uint64) (*storedServer, bool) {
+func (s *JSONStore) FindServerByIDAny(id uint64) (*Server, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	srv, ok := s.serversByID[id]
@@ -477,27 +449,27 @@ func (s *jsonStore) FindServerByIDAny(id uint64) (*storedServer, bool) {
 	return &out, true
 }
 
-func (s *jsonStore) UpdateServer(userID, id uint64, apply func(*storedServer) error) (storedServer, error) {
+func (s *JSONStore) UpdateServer(userID, id uint64, apply func(*Server) error) (Server, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur, ok := s.serversByID[id]
 	if !ok || !serverHasUser(&cur, userID) {
-		return storedServer{}, os.ErrNotExist
+		return Server{}, os.ErrNotExist
 	}
 
 	next := cur
 	if err := apply(&next); err != nil {
-		return storedServer{}, err
+		return Server{}, err
 	}
 	next.UpdatedAt = time.Now()
 	if err := writeJSONAtomic(s.serverPath(next.ID), next); err != nil {
-		return storedServer{}, err
+		return Server{}, err
 	}
 	s.serversByID[id] = next
 	return next, nil
 }
 
-func (s *jsonStore) DeleteServer(userID, id uint64) (bool, error) {
+func (s *JSONStore) DeleteServer(userID, id uint64) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	srv, ok := s.serversByID[id]
@@ -506,7 +478,7 @@ func (s *jsonStore) DeleteServer(userID, id uint64) (bool, error) {
 	}
 	if len(srv.UserIDs) > 1 {
 		next := srv
-		serverRemoveUser(&next, userID)
+		next.UserIDs = removeUserID(next.UserIDs, userID)
 		next.UpdatedAt = time.Now()
 		if err := writeJSONAtomic(s.serverPath(next.ID), next); err != nil {
 			return false, err
@@ -521,10 +493,23 @@ func (s *jsonStore) DeleteServer(userID, id uint64) (bool, error) {
 	return true, nil
 }
 
-func (s *jsonStore) ListUsers() []storedUser {
+func removeUserID(ids []uint64, userID uint64) []uint64 {
+	if len(ids) == 0 {
+		return nil
+	}
+	dst := ids[:0]
+	for _, id := range ids {
+		if id != userID {
+			dst = append(dst, id)
+		}
+	}
+	return CleanUserIDs(dst)
+}
+
+func (s *JSONStore) ListUsers() []User {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]storedUser, 0, len(s.usersByID))
+	out := make([]User, 0, len(s.usersByID))
 	for _, u := range s.usersByID {
 		out = append(out, u)
 	}
@@ -532,10 +517,10 @@ func (s *jsonStore) ListUsers() []storedUser {
 	return out
 }
 
-func (s *jsonStore) ListServersAny() []storedServer {
+func (s *JSONStore) ListServersAny() []Server {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]storedServer, 0, len(s.serversByID))
+	out := make([]Server, 0, len(s.serversByID))
 	for _, srv := range s.serversByID {
 		out = append(out, srv)
 	}
@@ -543,27 +528,27 @@ func (s *jsonStore) ListServersAny() []storedServer {
 	return out
 }
 
-func (s *jsonStore) UpdateServerAny(id uint64, apply func(*storedServer) error) (storedServer, error) {
+func (s *JSONStore) UpdateServerAny(id uint64, apply func(*Server) error) (Server, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur, ok := s.serversByID[id]
 	if !ok {
-		return storedServer{}, os.ErrNotExist
+		return Server{}, os.ErrNotExist
 	}
 
 	next := cur
 	if err := apply(&next); err != nil {
-		return storedServer{}, err
+		return Server{}, err
 	}
 	next.UpdatedAt = time.Now()
 	if err := writeJSONAtomic(s.serverPath(next.ID), next); err != nil {
-		return storedServer{}, err
+		return Server{}, err
 	}
 	s.serversByID[id] = next
 	return next, nil
 }
 
-func (s *jsonStore) DeleteServerAny(id uint64) (bool, error) {
+func (s *JSONStore) DeleteServerAny(id uint64) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.serversByID[id]; !ok {
@@ -575,3 +560,4 @@ func (s *jsonStore) DeleteServerAny(id uint64) (bool, error) {
 	delete(s.serversByID, id)
 	return true, nil
 }
+
