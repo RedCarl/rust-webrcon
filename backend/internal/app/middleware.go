@@ -44,7 +44,13 @@ func (a *App) ginAdminRequired() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID := mustUserID(c)
 		u, ok := a.Store.FindUserByID(userID)
-		if !ok || strings.TrimSpace(u.Username) != "system" {
+		if !ok {
+			c.JSON(403, apiErrorBody{Message: "无权限"})
+			c.Abort()
+			return
+		}
+		name := strings.TrimSpace(u.Username)
+		if name != "system" && name != "admin" {
 			c.JSON(403, apiErrorBody{Message: "无权限"})
 			c.Abort()
 			return

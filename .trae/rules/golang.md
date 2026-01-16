@@ -6,3 +6,4 @@
 6.需要保证有流畅的合理的动画，让交互更顺畅。
 7.Go语言后端使用Standard Go Project Layout标准来组织项目结构。
 8.API接口严格使用RESTful风格。
+9.shadcn-ui组件库使用最新版本,并且使用 pnpm dlx shadcn@latest add 命令的形式导入组件。

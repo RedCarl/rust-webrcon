@@ -1,16 +1,21 @@
 import * as React from "react";
 import { useNavigate } from "react-router-dom";
-import { LogOut, Moon, Sun, Settings } from "lucide-react";
+import { Calendar as CalendarIcon, ChevronDownIcon, LogOut, Moon, Settings, Sun } from "lucide-react";
+import { format } from "date-fns";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Calendar } from "@/components/ui/calendar";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AppFooter, AppHeader } from "@/components/app-shell";
 import { apiJson, clearToken } from "@/lib/auth";
 import { useRcon } from "@/lib/rcon-context";
 import { toast } from "sonner";
+import { zhCN } from "date-fns/locale";
 
 type ServerDto = {
   id: number;
@@ -19,6 +24,7 @@ type ServerDto = {
   port: number;
   rcon_password: string;
   container_name?: string | null;
+  last_wipe_at: string;
 };
 
 type ServerActionResponse = {
@@ -26,6 +32,43 @@ type ServerActionResponse = {
   stderr: string;
   exit_code: number;
 };
+
+function formatDateTime(s: string) {
+  const text = (s ?? "").trim();
+  if (!text) return "";
+  const d = new Date(text);
+  if (Number.isNaN(d.getTime())) return text;
+  try {
+    return d.toLocaleString("zh-CN", { hour12: false });
+  } catch {
+    return d.toLocaleString();
+  }
+}
+
+function parseOptionalDateTime(value: string): Date | undefined {
+  const text = (value ?? "").trim();
+  if (!text) return undefined;
+  const d = new Date(text);
+  if (Number.isNaN(d.getTime())) return undefined;
+  return d;
+}
+
+function formatWipeAtValue(date: Date, timeStr?: string): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  const t = timeStr ? timeStr : "00:00:00";
+  return `${y}-${m}-${d}T${t}`;
+}
+
+function getWipeTime(value: string): string {
+  const date = parseOptionalDateTime(value);
+  if (!date) return "00:00:00";
+  const h = String(date.getHours()).padStart(2, "0");
+  const m = String(date.getMinutes()).padStart(2, "0");
+  const s = String(date.getSeconds()).padStart(2, "0");
+  return `${h}:${m}:${s}`;
+}
 
 export default function ServersPage() {
   const navigate = useNavigate();
@@ -52,6 +95,8 @@ export default function ServersPage() {
   const [editPort, setEditPort] = React.useState("28016");
   const [editPassword, setEditPassword] = React.useState("");
   const [editContainerName, setEditContainerName] = React.useState("");
+  const [editLastWipeAt, setEditLastWipeAt] = React.useState("");
+  const [editLastWipeOpen, setEditLastWipeOpen] = React.useState(false);
 
   const refresh = React.useCallback(async () => {
     setLoading(true);
@@ -156,6 +201,7 @@ export default function ServersPage() {
                       <TableHead>地址</TableHead>
                       <TableHead>端口</TableHead>
                       <TableHead>容器</TableHead>
+                      <TableHead>清档时间</TableHead>
                       <TableHead className="text-right">操作</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -166,6 +212,9 @@ export default function ServersPage() {
                           <TableCell className="font-mono text-xs">{s.host}</TableCell>
                           <TableCell className="font-mono text-xs">{s.port ? s.port : "-"}</TableCell>
                           <TableCell className="font-mono text-xs">{s.container_name ?? "-"}</TableCell>
+                          <TableCell className="font-mono text-xs text-muted-foreground">
+                            {formatDateTime(s.last_wipe_at) || "-"}
+                          </TableCell>
                           <TableCell className="text-right">
                             <div className="flex justify-end gap-2">
                               <Button
@@ -191,6 +240,7 @@ export default function ServersPage() {
                             setEditPort(s.port ? String(s.port) : "");
                             setEditPassword(s.rcon_password);
                             setEditContainerName(s.container_name ?? "");
+                            setEditLastWipeAt(s.last_wipe_at ?? "");
                           }}
                         >
                           编辑
@@ -434,6 +484,58 @@ export default function ServersPage() {
                 onChange={(e) => setEditContainerName(e.target.value)}
               />
             </div>
+            <div className="flex gap-4 md:col-span-2">
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="edit-last-wipe-at">清档日期（可选）</Label>
+                <Popover open={editLastWipeOpen} onOpenChange={setEditLastWipeOpen}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      id="edit-last-wipe-at"
+                      className={cn(
+                        "w-[240px] justify-start text-left font-normal",
+                        !editLastWipeAt && "text-muted-foreground",
+                      )}
+                    >
+                      <CalendarIcon className="mr-2 h-4 w-4" />
+                      {parseOptionalDateTime(editLastWipeAt)
+                        ? format(parseOptionalDateTime(editLastWipeAt)!, "PPP", { locale: zhCN })
+                        : "选择日期"}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-0" align="start">
+                    <Calendar
+                      mode="single"
+                      locale={zhCN}
+                      selected={parseOptionalDateTime(editLastWipeAt)}
+                      onSelect={(date) => {
+                        if (date) {
+                          const time = getWipeTime(editLastWipeAt);
+                          setEditLastWipeAt(formatWipeAtValue(date, time));
+                        } else {
+                          setEditLastWipeAt("");
+                        }
+                        setEditLastWipeOpen(false);
+                      }}
+                      initialFocus
+                    />
+                  </PopoverContent>
+                </Popover>
+              </div>
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="edit-last-wipe-time">清档时间</Label>
+                <Input
+                  type="time"
+                  step="1"
+                  value={getWipeTime(editLastWipeAt)}
+                  onChange={(e) => {
+                    const date = parseOptionalDateTime(editLastWipeAt) || new Date();
+                    setEditLastWipeAt(formatWipeAtValue(date, e.target.value));
+                  }}
+                  className="w-32"
+                />
+              </div>
+            </div>
           </div>
           <DialogFooter>
             <Button
@@ -462,6 +564,7 @@ export default function ServersPage() {
                       port,
                       rcon_password: editPassword,
                       container_name: editContainerName.trim() ? editContainerName.trim() : null,
+                      last_wipe_at: editLastWipeAt.trim(),
                     }),
                   });
                   setEditing(null);

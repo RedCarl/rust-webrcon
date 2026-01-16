@@ -130,6 +130,7 @@ type serverDTO struct {
 	Port          uint16  `json:"port"`
 	RconPassword  string  `json:"rcon_password"`
 	ContainerName *string `json:"container_name"`
+	LastWipeAt    string  `json:"last_wipe_at"`
 }
 
 func (a *App) ginListServers(c *gin.Context) {
@@ -149,6 +150,7 @@ func (a *App) ginListServers(c *gin.Context) {
 			Port:          srv.Port,
 			RconPassword:  pw,
 			ContainerName: srv.ContainerName,
+			LastWipeAt:    strings.TrimSpace(srv.LastWipeAt),
 		})
 	}
 	c.JSON(200, out)
@@ -205,6 +207,7 @@ func (a *App) ginCreateServer(c *gin.Context) {
 		Port:          srv.Port,
 		RconPassword:  pw,
 		ContainerName: srv.ContainerName,
+		LastWipeAt:    strings.TrimSpace(srv.LastWipeAt),
 	})
 }
 
@@ -214,6 +217,7 @@ type updateServerRequest struct {
 	Port          *uint16 `json:"port"`
 	RconPassword  *string `json:"rcon_password"`
 	ContainerName *string `json:"container_name"`
+	LastWipeAt    *string `json:"last_wipe_at"`
 }
 
 func (a *App) ginUpdateServer(c *gin.Context) {
@@ -262,6 +266,9 @@ func (a *App) ginUpdateServer(c *gin.Context) {
 		if req.ContainerName != nil {
 			srv.ContainerName = normalizeOptionalString(req.ContainerName)
 		}
+		if req.LastWipeAt != nil {
+			srv.LastWipeAt = strings.TrimSpace(*req.LastWipeAt)
+		}
 		return nil
 	})
 	if err != nil {
@@ -290,6 +297,7 @@ func (a *App) ginUpdateServer(c *gin.Context) {
 		Port:          updated.Port,
 		RconPassword:  pw,
 		ContainerName: updated.ContainerName,
+		LastWipeAt:    strings.TrimSpace(updated.LastWipeAt),
 	})
 }
 
@@ -495,6 +503,7 @@ type adminServerDTO struct {
 	Port          uint16   `json:"port"`
 	RconPassword  string   `json:"rcon_password"`
 	ContainerName *string  `json:"container_name"`
+	LastWipeAt    string   `json:"last_wipe_at"`
 }
 
 func (a *App) ginAdminListServers(c *gin.Context) {
@@ -514,6 +523,7 @@ func (a *App) ginAdminListServers(c *gin.Context) {
 			Port:          srv.Port,
 			RconPassword:  pw,
 			ContainerName: srv.ContainerName,
+			LastWipeAt:    strings.TrimSpace(srv.LastWipeAt),
 		})
 	}
 	c.JSON(200, out)
@@ -587,6 +597,7 @@ func (a *App) ginAdminCreateServer(c *gin.Context) {
 		Port:          srv.Port,
 		RconPassword:  pw,
 		ContainerName: srv.ContainerName,
+		LastWipeAt:    strings.TrimSpace(srv.LastWipeAt),
 	})
 }
 
@@ -598,6 +609,7 @@ type adminUpdateServerRequest struct {
 	Port          *uint16   `json:"port"`
 	RconPassword  *string   `json:"rcon_password"`
 	ContainerName *string   `json:"container_name"`
+	LastWipeAt    *string   `json:"last_wipe_at"`
 }
 
 func (a *App) ginAdminUpdateServer(c *gin.Context) {
@@ -667,6 +679,9 @@ func (a *App) ginAdminUpdateServer(c *gin.Context) {
 		if req.ContainerName != nil {
 			srv.ContainerName = normalizeOptionalString(req.ContainerName)
 		}
+		if req.LastWipeAt != nil {
+			srv.LastWipeAt = strings.TrimSpace(*req.LastWipeAt)
+		}
 		return nil
 	})
 	if err != nil {
@@ -698,6 +713,7 @@ func (a *App) ginAdminUpdateServer(c *gin.Context) {
 		Port:          updated.Port,
 		RconPassword:  pw,
 		ContainerName: updated.ContainerName,
+		LastWipeAt:    strings.TrimSpace(updated.LastWipeAt),
 	})
 }
 

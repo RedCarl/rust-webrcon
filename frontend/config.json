@@ -1,0 +1,7 @@
+{
+  "bind_addr": "0.0.0.0:8084",
+  "jwt_secret": "c4a33d002a3ad1a8d538b3844d6b6ee107fb4b734a5dccb4cd6b6443ad4878d8",
+  "rcon_encryption_key": "+PFuBB3xhQtY0CDkTApLK7Kl3l1Jok+atNc/e5K0x58=",
+  "data_dir": ".",
+  "docker_bin": "docker"
+}

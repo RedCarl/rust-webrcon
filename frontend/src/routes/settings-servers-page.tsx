@@ -1,15 +1,20 @@
 import * as React from "react";
 import { useNavigate } from "react-router-dom";
-import { Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Calendar as CalendarIcon, ChevronDown, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { format } from "date-fns";
+import { cn } from "@/lib/utils";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Calendar } from "@/components/ui/calendar";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { apiJson, clearToken } from "@/lib/auth";
 import { toast } from "sonner";
+import { zhCN } from "date-fns/locale";
 
 type AdminUserDto = {
   id: number;
@@ -25,7 +30,35 @@ type AdminServerDto = {
   port: number;
   rcon_password: string;
   container_name?: string | null;
+  last_wipe_at: string;
 };
+
+function formatDateTime(s: string) {
+  const text = (s ?? "").trim();
+  if (!text) return "";
+  const d = new Date(text);
+  if (Number.isNaN(d.getTime())) return text;
+  try {
+    return d.toLocaleString("zh-CN", { hour12: false });
+  } catch {
+    return d.toLocaleString();
+  }
+}
+
+function parseOptionalDateTime(value: string): Date | undefined {
+  const text = (value ?? "").trim();
+  if (!text) return undefined;
+  const d = new Date(text);
+  if (Number.isNaN(d.getTime())) return undefined;
+  return d;
+}
+
+function formatWipeAtValue(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}T00:00:00`;
+}
 
 export default function SettingsServersPage() {
   const navigate = useNavigate();
@@ -48,6 +81,8 @@ export default function SettingsServersPage() {
   const [editPort, setEditPort] = React.useState("28016");
   const [editPassword, setEditPassword] = React.useState("");
   const [editContainerName, setEditContainerName] = React.useState("");
+  const [editLastWipeAt, setEditLastWipeAt] = React.useState("");
+  const [editLastWipeOpen, setEditLastWipeOpen] = React.useState(false);
 
   const refresh = React.useCallback(async () => {
     setLoading(true);
@@ -111,6 +146,7 @@ export default function SettingsServersPage() {
                   <TableHead>端口</TableHead>
                   <TableHead>账号</TableHead>
                   <TableHead>容器</TableHead>
+                  <TableHead>清档时间</TableHead>
                   <TableHead className="text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
@@ -126,6 +162,9 @@ export default function SettingsServersPage() {
                         : "-")}
                     </TableCell>
                     <TableCell className="font-mono text-xs">{s.container_name ?? "-"}</TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground">
+                      {formatDateTime(s.last_wipe_at) || "-"}
+                    </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">
                         <Button
@@ -140,6 +179,8 @@ export default function SettingsServersPage() {
                             setEditPort(String(s.port ?? 0));
                             setEditPassword(s.rcon_password);
                             setEditContainerName(s.container_name ?? "");
+                            setEditLastWipeAt(s.last_wipe_at ?? "");
+                            setEditLastWipeOpen(false);
                           }}
                         >
                           <Pencil className="h-4 w-4" />
@@ -390,6 +431,39 @@ export default function SettingsServersPage() {
                 placeholder="rust-server"
               />
             </div>
+            <div className="grid gap-2 md:col-span-2">
+              <Label htmlFor="edit-last-wipe-at">清档时间（可选）</Label>
+              <Popover open={editLastWipeOpen} onOpenChange={setEditLastWipeOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="outline"
+                    id="edit-last-wipe-at"
+                    className={cn(
+                      "w-[240px] justify-start text-left font-normal",
+                      !editLastWipeAt && "text-muted-foreground",
+                    )}
+                  >
+                    <CalendarIcon className="mr-2 h-4 w-4" />
+                    {parseOptionalDateTime(editLastWipeAt)
+                      ? format(parseOptionalDateTime(editLastWipeAt)!, "PPP", { locale: zhCN })
+                      : "选择日期"}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-0" align="start">
+                  <Calendar
+                    mode="single"
+                    locale={zhCN}
+                    selected={parseOptionalDateTime(editLastWipeAt)}
+                    onSelect={(date) => {
+                      if (date) setEditLastWipeAt(formatWipeAtValue(date));
+                      else setEditLastWipeAt("");
+                      setEditLastWipeOpen(false);
+                    }}
+                    initialFocus
+                  />
+                </PopoverContent>
+              </Popover>
+            </div>
           </div>
           <DialogFooter>
             <Button
@@ -431,6 +505,7 @@ export default function SettingsServersPage() {
                       port,
                       rcon_password: pw,
                       container_name: editContainerName.trim() ? editContainerName.trim() : "",
+                      last_wipe_at: editLastWipeAt.trim(),
                     }),
                   });
                   setEditing(null);
