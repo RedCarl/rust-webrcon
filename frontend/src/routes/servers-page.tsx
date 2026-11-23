@@ -25,12 +25,18 @@ type ServerDto = {
   rcon_password: string;
   container_name?: string | null;
   last_wipe_at: string;
+  always_use_today_wipe_date: boolean;
 };
 
 type ServerActionResponse = {
-  stdout: string;
-  stderr: string;
-  exit_code: number;
+  ok: boolean;
+  partial_success: boolean;
+  stage: string;
+  message: string;
+  logs: string[];
+  map_filename?: string;
+  map_url?: string;
+  web_rcon_error_message?: string;
 };
 
 function formatDateTime(s: string) {
@@ -97,6 +103,7 @@ export default function ServersPage() {
   const [editContainerName, setEditContainerName] = React.useState("");
   const [editLastWipeAt, setEditLastWipeAt] = React.useState("");
   const [editLastWipeOpen, setEditLastWipeOpen] = React.useState(false);
+  const [editAlwaysUseTodayWipeDate, setEditAlwaysUseTodayWipeDate] = React.useState(false);
 
   const refresh = React.useCallback(async () => {
     setLoading(true);
@@ -241,6 +248,8 @@ export default function ServersPage() {
                             setEditPassword(s.rcon_password);
                             setEditContainerName(s.container_name ?? "");
                             setEditLastWipeAt(s.last_wipe_at ?? "");
+                            setEditAlwaysUseTodayWipeDate(Boolean(s.always_use_today_wipe_date));
+                            setEditLastWipeOpen(false);
                           }}
                         >
                           编辑
@@ -274,20 +283,27 @@ export default function ServersPage() {
                         <Button
                           size="sm"
                           variant="destructive"
-                          disabled={actionBusyId === s.id || !s.container_name}
+                          disabled={actionBusyId === s.id}
                           onClick={async () => {
-                            if (!s.container_name) return;
                             if (!window.confirm(`确定对 ${s.name} 执行清档？`)) return;
                             setActionBusyId(s.id);
                             try {
-                              const res = await apiJson<ServerActionResponse>(`/api/servers/${s.id}/actions/wipe`, {
+                              const res = await apiJson<ServerActionResponse>(`/api/servers/${s.id}/wipes`, {
                                 method: "POST",
                               });
-                              const output = [`exit_code: ${res.exit_code}`, "", res.stdout, res.stderr]
-                                .filter((x) => x !== null && x !== undefined)
+                              const output = [
+                                `结果：${res.message}`,
+                                res.map_filename ? `地图文件：${res.map_filename}` : "",
+                                res.map_url ? `地图地址：${res.map_url}` : "",
+                                res.web_rcon_error_message ? `WebRCON：${res.web_rcon_error_message}` : "",
+                                "",
+                                ...(res.logs ?? []),
+                              ]
+                                .filter(Boolean)
                                 .join("\n");
-                              setActionTitle(`清档：${s.name}`);
+                              setActionTitle(`自动清档：${s.name}`);
                               setActionOutput(output.trim() ? output : "无输出");
+                              await refresh();
                             } catch (e) {
                               toast.error(e instanceof Error ? e.message : "执行失败");
                             } finally {
@@ -363,7 +379,6 @@ export default function ServersPage() {
               <Label htmlFor="create-password">RCON 密码</Label>
               <Input
                 id="create-password"
-                type="password"
                 value={createPassword}
                 onChange={(e) => setCreatePassword(e.target.value)}
               />
@@ -471,7 +486,6 @@ export default function ServersPage() {
               <Label htmlFor="edit-password">RCON 密码</Label>
               <Input
                 id="edit-password"
-                type="password"
                 value={editPassword}
                 onChange={(e) => setEditPassword(e.target.value)}
               />
@@ -484,6 +498,18 @@ export default function ServersPage() {
                 onChange={(e) => setEditContainerName(e.target.value)}
               />
             </div>
+            <label className="flex items-center gap-3 rounded-md border px-3 py-2 text-sm md:col-span-2">
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={editAlwaysUseTodayWipeDate}
+                onChange={(e) => setEditAlwaysUseTodayWipeDate(e.target.checked)}
+              />
+              <div className="grid gap-1">
+                <span>始终以今天作为清档日期</span>
+                <span className="text-xs text-muted-foreground">开启后，接口每次返回的清档日期都会自动变成当天。</span>
+              </div>
+            </label>
             <div className="flex gap-4 md:col-span-2">
               <div className="flex flex-col gap-2">
                 <Label htmlFor="edit-last-wipe-at">清档日期（可选）</Label>
@@ -492,6 +518,7 @@ export default function ServersPage() {
                     <Button
                       variant="outline"
                       id="edit-last-wipe-at"
+                      disabled={editAlwaysUseTodayWipeDate}
                       className={cn(
                         "w-[240px] justify-start text-left font-normal",
                         !editLastWipeAt && "text-muted-foreground",
@@ -532,6 +559,7 @@ export default function ServersPage() {
                     const date = parseOptionalDateTime(editLastWipeAt) || new Date();
                     setEditLastWipeAt(formatWipeAtValue(date, e.target.value));
                   }}
+                  disabled={editAlwaysUseTodayWipeDate}
                   className="w-32"
                 />
               </div>
@@ -565,6 +593,7 @@ export default function ServersPage() {
                       rcon_password: editPassword,
                       container_name: editContainerName.trim() ? editContainerName.trim() : null,
                       last_wipe_at: editLastWipeAt.trim(),
+                      always_use_today_wipe_date: editAlwaysUseTodayWipeDate,
                     }),
                   });
                   setEditing(null);

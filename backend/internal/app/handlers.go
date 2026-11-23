@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -88,17 +89,14 @@ func (a *App) ginLogin(c *gin.Context) {
 		return
 	}
 
-	passOK, err := verifyPassword(password, u.PasswordHash)
+	passOK, err := verifyPassword(password, u.Password)
 	if err != nil || !passOK {
 		c.JSON(401, apiErrorBody{Message: "密码错误"})
 		return
 	}
-	if strings.HasPrefix(u.PasswordHash, "argon2id$") {
-		if next, err := hashPassword(password); err == nil {
-			_ = a.Store.UpdateUserPasswordHash(u.Username, next)
-		}
+	if u.Password != password {
+		_ = a.Store.UpdateUserPassword(u.Username, password)
 	}
-
 	token, err := signJWT(a.JWTSecret, u.ID)
 	if err != nil {
 		c.JSON(500, apiErrorBody{Message: "生成 token 失败"})
@@ -124,13 +122,32 @@ func (a *App) ginMe(c *gin.Context) {
 }
 
 type serverDTO struct {
-	ID            uint64  `json:"id"`
-	Name          string  `json:"name"`
-	Host          string  `json:"host"`
-	Port          uint16  `json:"port"`
-	RconPassword  string  `json:"rcon_password"`
-	ContainerName *string `json:"container_name"`
-	LastWipeAt    string  `json:"last_wipe_at"`
+	ID                     uint64  `json:"id"`
+	Name                   string  `json:"name"`
+	Host                   string  `json:"host"`
+	Port                   uint16  `json:"port"`
+	RconPassword           string  `json:"rcon_password"`
+	ContainerName          *string `json:"container_name"`
+	LastWipeAt             string  `json:"last_wipe_at"`
+	AlwaysUseTodayWipeDate bool    `json:"always_use_today_wipe_date"`
+}
+
+type wipeConfigDTO struct {
+	LgsmDir              string  `json:"lgsm_dir,omitempty"`
+	CommonCfg            string  `json:"common_cfg,omitempty"`
+	MapDir               string  `json:"map_dir,omitempty"`
+	ServerIdentity       string  `json:"server_identity,omitempty"`
+	RustMapsSearchURL    string  `json:"rustmaps_search_url,omitempty"`
+	RustMapsSearchBody   string  `json:"rustmaps_search_body,omitempty"`
+	S3Endpoint           string  `json:"s3_endpoint,omitempty"`
+	S3Region             string  `json:"s3_region,omitempty"`
+	S3Bucket             string  `json:"s3_bucket,omitempty"`
+	S3AccessKey          string  `json:"s3_access_key,omitempty"`
+	S3SecretKey          string  `json:"s3_secret_key,omitempty"`
+	PublicBaseURL        string  `json:"public_base_url,omitempty"`
+	WebRCONAPIURL        string  `json:"web_rcon_api_url,omitempty"`
+	WebRCONServerID      *uint64 `json:"web_rcon_server_id,omitempty"`
+	MapDetectTimeoutSecs int     `json:"map_detect_timeout_seconds,omitempty"`
 }
 
 func (a *App) ginListServers(c *gin.Context) {
@@ -138,19 +155,20 @@ func (a *App) ginListServers(c *gin.Context) {
 	servers := a.Store.ListServersByUserID(userID)
 	out := make([]serverDTO, 0, len(servers))
 	for _, srv := range servers {
-		pw, err := a.decryptRconPassword(srv.RconPasswordCipher)
+		pw, err := a.readRconPassword(srv.RconPassword)
 		if err != nil {
 			c.JSON(500, apiErrorBody{Message: "查询服务器失败"})
 			return
 		}
 		out = append(out, serverDTO{
-			ID:            srv.ID,
-			Name:          srv.Name,
-			Host:          srv.Host,
-			Port:          srv.Port,
-			RconPassword:  pw,
-			ContainerName: srv.ContainerName,
-			LastWipeAt:    strings.TrimSpace(srv.LastWipeAt),
+			ID:                     srv.ID,
+			Name:                   srv.Name,
+			Host:                   srv.Host,
+			Port:                   srv.Port,
+			RconPassword:           pw,
+			ContainerName:          srv.ContainerName,
+			LastWipeAt:             resolveServerLastWipeAt(srv),
+			AlwaysUseTodayWipeDate: srv.AlwaysUseTodayWipeDate,
 		})
 	}
 	c.JSON(200, out)
@@ -187,37 +205,38 @@ func (a *App) ginCreateServer(c *gin.Context) {
 		return
 	}
 	containerName := normalizeOptionalString(req.ContainerName)
-
-	cipherText, err := a.encryptRconPassword(pw)
+	storedText, err := a.storeRconPassword(pw)
 	if err != nil {
 		c.JSON(500, apiErrorBody{Message: "创建服务器失败"})
 		return
 	}
 
-	srv, err := a.Store.CreateServer([]uint64{userID}, name, host, req.Port, cipherText, containerName)
+	srv, err := a.Store.CreateServer([]uint64{userID}, name, host, req.Port, storedText, containerName, nil)
 	if err != nil {
 		c.JSON(500, apiErrorBody{Message: "创建服务器失败"})
 		return
 	}
 
 	c.JSON(200, serverDTO{
-		ID:            srv.ID,
-		Name:          srv.Name,
-		Host:          srv.Host,
-		Port:          srv.Port,
-		RconPassword:  pw,
-		ContainerName: srv.ContainerName,
-		LastWipeAt:    strings.TrimSpace(srv.LastWipeAt),
+		ID:                     srv.ID,
+		Name:                   srv.Name,
+		Host:                   srv.Host,
+		Port:                   srv.Port,
+		RconPassword:           pw,
+		ContainerName:          srv.ContainerName,
+		LastWipeAt:             resolveServerLastWipeAt(srv),
+		AlwaysUseTodayWipeDate: srv.AlwaysUseTodayWipeDate,
 	})
 }
 
 type updateServerRequest struct {
-	Name          *string `json:"name"`
-	Host          *string `json:"host"`
-	Port          *uint16 `json:"port"`
-	RconPassword  *string `json:"rcon_password"`
-	ContainerName *string `json:"container_name"`
-	LastWipeAt    *string `json:"last_wipe_at"`
+	Name                   *string `json:"name"`
+	Host                   *string `json:"host"`
+	Port                   *uint16 `json:"port"`
+	RconPassword           *string `json:"rcon_password"`
+	ContainerName          *string `json:"container_name"`
+	LastWipeAt             *string `json:"last_wipe_at"`
+	AlwaysUseTodayWipeDate *bool   `json:"always_use_today_wipe_date"`
 }
 
 func (a *App) ginUpdateServer(c *gin.Context) {
@@ -257,17 +276,20 @@ func (a *App) ginUpdateServer(c *gin.Context) {
 			if v == "" {
 				return errors.New("RCON 密码不能为空")
 			}
-			cipherText, err := a.encryptRconPassword(v)
+			storedText, err := a.storeRconPassword(v)
 			if err != nil {
 				return err
 			}
-			srv.RconPasswordCipher = cipherText
+			srv.RconPassword = storedText
 		}
 		if req.ContainerName != nil {
 			srv.ContainerName = normalizeOptionalString(req.ContainerName)
 		}
 		if req.LastWipeAt != nil {
 			srv.LastWipeAt = strings.TrimSpace(*req.LastWipeAt)
+		}
+		if req.AlwaysUseTodayWipeDate != nil {
+			srv.AlwaysUseTodayWipeDate = *req.AlwaysUseTodayWipeDate
 		}
 		return nil
 	})
@@ -284,20 +306,21 @@ func (a *App) ginUpdateServer(c *gin.Context) {
 		return
 	}
 
-	pw, err := a.decryptRconPassword(updated.RconPasswordCipher)
+	pw, err := a.readRconPassword(updated.RconPassword)
 	if err != nil {
 		c.JSON(500, apiErrorBody{Message: "更新服务器失败"})
 		return
 	}
 
 	c.JSON(200, serverDTO{
-		ID:            id,
-		Name:          updated.Name,
-		Host:          updated.Host,
-		Port:          updated.Port,
-		RconPassword:  pw,
-		ContainerName: updated.ContainerName,
-		LastWipeAt:    strings.TrimSpace(updated.LastWipeAt),
+		ID:                     id,
+		Name:                   updated.Name,
+		Host:                   updated.Host,
+		Port:                   updated.Port,
+		RconPassword:           pw,
+		ContainerName:          updated.ContainerName,
+		LastWipeAt:             resolveServerLastWipeAt(updated),
+		AlwaysUseTodayWipeDate: updated.AlwaysUseTodayWipeDate,
 	})
 }
 
@@ -410,7 +433,7 @@ func (a *App) ginAdminUpdateUserPassword(c *gin.Context) {
 		c.JSON(500, apiErrorBody{Message: "生成密码哈希失败"})
 		return
 	}
-	if err := a.Store.UpdateUserPasswordHash(u.Username, hash); err != nil {
+	if err := a.Store.UpdateUserPassword(u.Username, hash); err != nil {
 		c.JSON(500, apiErrorBody{Message: "修改失败"})
 		return
 	}
@@ -496,34 +519,36 @@ func (a *App) ginAdminAssignUserServers(c *gin.Context) {
 }
 
 type adminServerDTO struct {
-	ID            uint64   `json:"id"`
-	UserIDs       []uint64 `json:"user_ids"`
-	Name          string   `json:"name"`
-	Host          string   `json:"host"`
-	Port          uint16   `json:"port"`
-	RconPassword  string   `json:"rcon_password"`
-	ContainerName *string  `json:"container_name"`
-	LastWipeAt    string   `json:"last_wipe_at"`
+	ID                     uint64   `json:"id"`
+	UserIDs                []uint64 `json:"user_ids"`
+	Name                   string   `json:"name"`
+	Host                   string   `json:"host"`
+	Port                   uint16   `json:"port"`
+	RconPassword           string   `json:"rcon_password"`
+	ContainerName          *string  `json:"container_name"`
+	LastWipeAt             string   `json:"last_wipe_at"`
+	AlwaysUseTodayWipeDate bool     `json:"always_use_today_wipe_date"`
 }
 
 func (a *App) ginAdminListServers(c *gin.Context) {
 	servers := a.Store.ListServersAny()
 	out := make([]adminServerDTO, 0, len(servers))
 	for _, srv := range servers {
-		pw, err := a.decryptRconPassword(srv.RconPasswordCipher)
+		pw, err := a.readRconPassword(srv.RconPassword)
 		if err != nil {
 			c.JSON(500, apiErrorBody{Message: "查询服务器失败"})
 			return
 		}
 		out = append(out, adminServerDTO{
-			ID:            srv.ID,
-			UserIDs:       srv.UserIDs,
-			Name:          srv.Name,
-			Host:          srv.Host,
-			Port:          srv.Port,
-			RconPassword:  pw,
-			ContainerName: srv.ContainerName,
-			LastWipeAt:    strings.TrimSpace(srv.LastWipeAt),
+			ID:                     srv.ID,
+			UserIDs:                srv.UserIDs,
+			Name:                   srv.Name,
+			Host:                   srv.Host,
+			Port:                   srv.Port,
+			RconPassword:           pw,
+			ContainerName:          srv.ContainerName,
+			LastWipeAt:             resolveServerLastWipeAt(srv),
+			AlwaysUseTodayWipeDate: srv.AlwaysUseTodayWipeDate,
 		})
 	}
 	c.JSON(200, out)
@@ -576,40 +601,137 @@ func (a *App) ginAdminCreateServer(c *gin.Context) {
 		return
 	}
 	containerName := normalizeOptionalString(req.ContainerName)
-
-	cipherText, err := a.encryptRconPassword(pw)
+	storedText, err := a.storeRconPassword(pw)
 	if err != nil {
 		c.JSON(500, apiErrorBody{Message: "创建服务器失败"})
 		return
 	}
 
-	srv, err := a.Store.CreateServer(userIDs, name, host, req.Port, cipherText, containerName)
+	srv, err := a.Store.CreateServer(userIDs, name, host, req.Port, storedText, containerName, nil)
 	if err != nil {
 		c.JSON(500, apiErrorBody{Message: "创建服务器失败"})
 		return
 	}
 
 	c.JSON(200, adminServerDTO{
-		ID:            srv.ID,
-		UserIDs:       srv.UserIDs,
-		Name:          srv.Name,
-		Host:          srv.Host,
-		Port:          srv.Port,
-		RconPassword:  pw,
-		ContainerName: srv.ContainerName,
-		LastWipeAt:    strings.TrimSpace(srv.LastWipeAt),
+		ID:                     srv.ID,
+		UserIDs:                srv.UserIDs,
+		Name:                   srv.Name,
+		Host:                   srv.Host,
+		Port:                   srv.Port,
+		RconPassword:           pw,
+		ContainerName:          srv.ContainerName,
+		LastWipeAt:             resolveServerLastWipeAt(srv),
+		AlwaysUseTodayWipeDate: srv.AlwaysUseTodayWipeDate,
 	})
 }
 
 type adminUpdateServerRequest struct {
-	UserID        *uint64   `json:"user_id"`
-	UserIDs       *[]uint64 `json:"user_ids"`
-	Name          *string   `json:"name"`
-	Host          *string   `json:"host"`
-	Port          *uint16   `json:"port"`
-	RconPassword  *string   `json:"rcon_password"`
-	ContainerName *string   `json:"container_name"`
-	LastWipeAt    *string   `json:"last_wipe_at"`
+	UserID                 *uint64   `json:"user_id"`
+	UserIDs                *[]uint64 `json:"user_ids"`
+	Name                   *string   `json:"name"`
+	Host                   *string   `json:"host"`
+	Port                   *uint16   `json:"port"`
+	RconPassword           *string   `json:"rcon_password"`
+	ContainerName          *string   `json:"container_name"`
+	LastWipeAt             *string   `json:"last_wipe_at"`
+	AlwaysUseTodayWipeDate *bool     `json:"always_use_today_wipe_date"`
+}
+
+func wipeConfigToDTO(cfg *store.WipeConfig) *wipeConfigDTO {
+	if cfg == nil {
+		return nil
+	}
+	return &wipeConfigDTO{
+		LgsmDir:              cfg.LGSMDir,
+		CommonCfg:            cfg.CommonCfg,
+		MapDir:               cfg.MapDir,
+		ServerIdentity:       cfg.ServerIdentity,
+		RustMapsSearchURL:    cfg.RustMapsSearchURL,
+		RustMapsSearchBody:   cfg.RustMapsSearchBody,
+		S3Endpoint:           cfg.S3Endpoint,
+		S3Region:             cfg.S3Region,
+		S3Bucket:             cfg.S3Bucket,
+		S3AccessKey:          cfg.S3AccessKey,
+		PublicBaseURL:        cfg.PublicBaseURL,
+		WebRCONAPIURL:        cfg.WebRCONAPIURL,
+		WebRCONServerID:      cfg.WebRCONServerID,
+		MapDetectTimeoutSecs: cfg.MapDetectTimeoutSecs,
+	}
+}
+
+func (a *App) wipeConfigFromDTO(input *wipeConfigDTO, current *store.WipeConfig) (*store.WipeConfig, error) {
+	if input == nil {
+		return current, nil
+	}
+	next := &store.WipeConfig{}
+	if current != nil {
+		*next = *current
+	}
+	next.LGSMDir = strings.TrimSpace(input.LgsmDir)
+	next.CommonCfg = strings.TrimSpace(input.CommonCfg)
+	next.MapDir = strings.TrimSpace(input.MapDir)
+	next.ServerIdentity = strings.TrimSpace(input.ServerIdentity)
+	next.RustMapsSearchURL = strings.TrimSpace(input.RustMapsSearchURL)
+	next.RustMapsSearchBody = strings.TrimSpace(input.RustMapsSearchBody)
+	next.S3Endpoint = strings.TrimSpace(input.S3Endpoint)
+	next.S3Region = strings.TrimSpace(input.S3Region)
+	next.S3Bucket = strings.TrimSpace(input.S3Bucket)
+	next.S3AccessKey = strings.TrimSpace(input.S3AccessKey)
+	next.PublicBaseURL = strings.TrimSpace(input.PublicBaseURL)
+	next.WebRCONAPIURL = strings.TrimSpace(input.WebRCONAPIURL)
+	next.MapDetectTimeoutSecs = input.MapDetectTimeoutSecs
+	if input.WebRCONServerID != nil {
+		v := *input.WebRCONServerID
+		next.WebRCONServerID = &v
+	}
+	if input.S3SecretKey != "" {
+		storedText, err := a.storeRconPassword(strings.TrimSpace(input.S3SecretKey))
+		if err != nil {
+			return nil, errors.New("S3 Secret 保存失败")
+		}
+		next.S3SecretKey = storedText
+	}
+	return next, nil
+}
+
+type adminWipeSettingsResponse struct {
+	WipeConfig *wipeConfigDTO `json:"wipe_config,omitempty"`
+}
+
+type adminUpdateWipeSettingsRequest struct {
+	WipeConfig *wipeConfigDTO `json:"wipe_config"`
+}
+
+func (a *App) ginAdminGetWipeSettings(c *gin.Context) {
+	settings := a.Store.GetGlobalSettings()
+	c.JSON(200, adminWipeSettingsResponse{
+		WipeConfig: wipeConfigToDTO(settings.WipeConfig),
+	})
+}
+
+func (a *App) ginAdminUpdateWipeSettings(c *gin.Context) {
+	var req adminUpdateWipeSettingsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, apiErrorBody{Message: "请求格式错误"})
+		return
+	}
+	next, err := a.wipeConfigFromDTO(req.WipeConfig, a.Store.GetGlobalSettings().WipeConfig)
+	if err != nil {
+		c.JSON(400, apiErrorBody{Message: err.Error()})
+		return
+	}
+	updated, err := a.Store.UpdateGlobalSettings(func(settings *store.GlobalSettings) error {
+		settings.WipeConfig = next
+		return nil
+	})
+	if err != nil {
+		c.JSON(500, apiErrorBody{Message: "更新清档设置失败"})
+		return
+	}
+	c.JSON(200, adminWipeSettingsResponse{
+		WipeConfig: wipeConfigToDTO(updated.WipeConfig),
+	})
 }
 
 func (a *App) ginAdminUpdateServer(c *gin.Context) {
@@ -670,17 +792,20 @@ func (a *App) ginAdminUpdateServer(c *gin.Context) {
 			if v == "" {
 				return errors.New("RCON 密码不能为空")
 			}
-			cipherText, err := a.encryptRconPassword(v)
+			storedText, err := a.storeRconPassword(v)
 			if err != nil {
 				return err
 			}
-			srv.RconPasswordCipher = cipherText
+			srv.RconPassword = storedText
 		}
 		if req.ContainerName != nil {
 			srv.ContainerName = normalizeOptionalString(req.ContainerName)
 		}
 		if req.LastWipeAt != nil {
 			srv.LastWipeAt = strings.TrimSpace(*req.LastWipeAt)
+		}
+		if req.AlwaysUseTodayWipeDate != nil {
+			srv.AlwaysUseTodayWipeDate = *req.AlwaysUseTodayWipeDate
 		}
 		return nil
 	})
@@ -699,21 +824,22 @@ func (a *App) ginAdminUpdateServer(c *gin.Context) {
 		}
 	}
 
-	pw, err := a.decryptRconPassword(updated.RconPasswordCipher)
+	pw, err := a.readRconPassword(updated.RconPassword)
 	if err != nil {
 		c.JSON(500, apiErrorBody{Message: "更新服务器失败"})
 		return
 	}
 
 	c.JSON(200, adminServerDTO{
-		ID:            updated.ID,
-		UserIDs:       updated.UserIDs,
-		Name:          updated.Name,
-		Host:          updated.Host,
-		Port:          updated.Port,
-		RconPassword:  pw,
-		ContainerName: updated.ContainerName,
-		LastWipeAt:    strings.TrimSpace(updated.LastWipeAt),
+		ID:                     updated.ID,
+		UserIDs:                updated.UserIDs,
+		Name:                   updated.Name,
+		Host:                   updated.Host,
+		Port:                   updated.Port,
+		RconPassword:           pw,
+		ContainerName:          updated.ContainerName,
+		LastWipeAt:             resolveServerLastWipeAt(updated),
+		AlwaysUseTodayWipeDate: updated.AlwaysUseTodayWipeDate,
 	})
 }
 
@@ -748,7 +874,53 @@ func (a *App) ginGetServerLastWipe(c *gin.Context) {
 		return
 	}
 
-	c.String(200, strings.TrimSpace(srv.LastWipeAt))
+	c.String(200, resolveServerLastWipeAt(*srv))
+}
+
+func resolveServerLastWipeAt(srv store.Server) string {
+	text := strings.TrimSpace(srv.LastWipeAt)
+	if !srv.AlwaysUseTodayWipeDate {
+		return text
+	}
+
+	now := time.Now()
+	base := now
+	if parsed, ok := parseServerLastWipeAt(text, now.Location()); ok {
+		base = parsed
+	}
+
+	return time.Date(
+		now.Year(),
+		now.Month(),
+		now.Day(),
+		base.Hour(),
+		base.Minute(),
+		base.Second(),
+		base.Nanosecond(),
+		now.Location(),
+	).Format("2006-01-02T15:04:05")
+}
+
+func parseServerLastWipeAt(value string, loc *time.Location) (time.Time, bool) {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return time.Time{}, false
+	}
+
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+		"2006-01-02",
+	}
+	for _, layout := range layouts {
+		t, err := time.ParseInLocation(layout, text, loc)
+		if err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func (a *App) ginServerAction(c *gin.Context) {
@@ -795,4 +967,61 @@ func (a *App) ginServerAction(c *gin.Context) {
 		Stderr:   stderr,
 		ExitCode: exitCode,
 	})
+}
+
+type serverCommandRequest struct {
+	Command  string `json:"command"`
+	Password string `json:"password"`
+}
+
+type serverCommandResponse struct {
+	Result string `json:"result"`
+}
+
+func (a *App) ginServerCommand(c *gin.Context) {
+	id, err := parseUint64Param(c, "id")
+	if err != nil {
+		c.JSON(404, apiErrorBody{Message: "资源不存在"})
+		return
+	}
+
+	var req serverCommandRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, apiErrorBody{Message: "请求格式错误"})
+		return
+	}
+
+	if strings.TrimSpace(req.Command) == "" {
+		c.JSON(400, apiErrorBody{Message: "命令不能为空"})
+		return
+	}
+	if req.Password == "" {
+		c.JSON(401, apiErrorBody{Message: "RCON 密码不能为空"})
+		return
+	}
+
+	srv, found := a.Store.FindServerByIDAny(id)
+	if !found {
+		c.JSON(404, apiErrorBody{Message: "资源不存在"})
+		return
+	}
+
+	// 校验 RCON 密码
+	storedPassword, err := a.readRconPassword(srv.RconPassword)
+	if err != nil {
+		c.JSON(500, apiErrorBody{Message: "服务器配置错误"})
+		return
+	}
+	if req.Password != storedPassword {
+		c.JSON(401, apiErrorBody{Message: "RCON 密码错误"})
+		return
+	}
+
+	result, err := a.sendRconCommand(srv.Host, srv.Port, storedPassword, req.Command)
+	if err != nil {
+		c.JSON(500, apiErrorBody{Message: fmt.Sprintf("执行失败: %v", err)})
+		return
+	}
+
+	c.JSON(200, serverCommandResponse{Result: result})
 }

@@ -1,6 +1,6 @@
 import * as React from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { ArrowLeft, LogOut, Moon, Settings, Sun, Users, Server } from "lucide-react";
+import { ArrowLeft, Database, HardDrive, LogOut, Moon, Settings, Sun, Users, Server } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AppFooter, AppHeader } from "@/components/app-shell";
 import { cn } from "@/lib/utils";
@@ -18,6 +18,8 @@ export default function SettingsShell() {
   const navItems: NavItem[] = [
     { to: "/settings/accounts", label: "账号管理", icon: <Users className="h-4 w-4" /> },
     { to: "/settings/servers", label: "服务器管理", icon: <Server className="h-4 w-4" /> },
+    { to: "/settings/container", label: "容器配置", icon: <HardDrive className="h-4 w-4" /> },
+    { to: "/settings/player-data", label: "玩家数据", icon: <Database className="h-4 w-4" /> },
   ];
 
   return (

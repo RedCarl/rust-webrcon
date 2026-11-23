@@ -13,11 +13,16 @@ import (
 )
 
 type AppConfig struct {
-	BindAddr          string `json:"bind_addr"`
-	JWTSecret         string `json:"jwt_secret"`
-	RconEncryptionKey string `json:"rcon_encryption_key"`
-	DataDir           string `json:"data_dir"`
-	DockerBin         string `json:"docker_bin"`
+	BindAddr                string `json:"bind_addr"`
+	JWTSecret               string `json:"jwt_secret"`
+	RconEncryptionKey       string `json:"rcon_encryption_key,omitempty"`
+	DataDir                 string `json:"data_dir"`
+	DockerBin               string `json:"docker_bin"`
+	PlayerDataMySQLHost     string `json:"player_data_mysql_host"`
+	PlayerDataMySQLPort     int    `json:"player_data_mysql_port"`
+	PlayerDataMySQLUser     string `json:"player_data_mysql_user"`
+	PlayerDataMySQLPassword string `json:"player_data_mysql_password"`
+	PlayerDataMySQLDatabase string `json:"player_data_mysql_database"`
 }
 
 func Load(path string) (AppConfig, error) {
@@ -56,17 +61,16 @@ func initConfigFile(path string) (AppConfig, error) {
 		return AppConfig{}, err
 	}
 
-	rconKey := make([]byte, 32)
-	if _, err := rand.Read(rconKey); err != nil {
-		return AppConfig{}, err
-	}
-
 	cfg := AppConfig{
-		BindAddr:          "0.0.0.0:8084",
-		JWTSecret:         hex.EncodeToString(jwtSecret),
-		RconEncryptionKey: base64.StdEncoding.EncodeToString(rconKey),
-		DataDir:           ".",
-		DockerBin:         "docker",
+		BindAddr:                "0.0.0.0:8084",
+		JWTSecret:               hex.EncodeToString(jwtSecret),
+		DataDir:                 ".",
+		DockerBin:               "docker",
+		PlayerDataMySQLHost:     "127.0.0.1",
+		PlayerDataMySQLPort:     3007,
+		PlayerDataMySQLUser:     "rust",
+		PlayerDataMySQLPassword: "kZhGch7QExxc4CwH",
+		PlayerDataMySQLDatabase: "rust",
 	}
 	cfg.Normalize()
 
@@ -100,14 +104,30 @@ func (c *AppConfig) Normalize() {
 	if c.DockerBin == "" {
 		c.DockerBin = "docker"
 	}
+	c.PlayerDataMySQLHost = strings.TrimSpace(c.PlayerDataMySQLHost)
+	if c.PlayerDataMySQLHost == "" {
+		c.PlayerDataMySQLHost = "127.0.0.1"
+	}
+	if c.PlayerDataMySQLPort <= 0 {
+		c.PlayerDataMySQLPort = 3007
+	}
+	c.PlayerDataMySQLUser = strings.TrimSpace(c.PlayerDataMySQLUser)
+	if c.PlayerDataMySQLUser == "" {
+		c.PlayerDataMySQLUser = "rust"
+	}
+	c.PlayerDataMySQLPassword = strings.TrimSpace(c.PlayerDataMySQLPassword)
+	if c.PlayerDataMySQLPassword == "" {
+		c.PlayerDataMySQLPassword = "kZhGch7QExxc4CwH"
+	}
+	c.PlayerDataMySQLDatabase = strings.TrimSpace(c.PlayerDataMySQLDatabase)
+	if c.PlayerDataMySQLDatabase == "" {
+		c.PlayerDataMySQLDatabase = "rust"
+	}
 }
 
 func (c *AppConfig) Validate() error {
 	if c.JWTSecret == "" {
 		return errors.New("jwt_secret 不能为空")
-	}
-	if c.RconEncryptionKey == "" {
-		return errors.New("rcon_encryption_key 不能为空")
 	}
 	if c.DataDir == "" {
 		return errors.New("data_dir 不能为空")
@@ -139,4 +159,3 @@ func isHexString(s string) bool {
 	}
 	return true
 }
-

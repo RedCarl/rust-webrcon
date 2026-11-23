@@ -63,4 +63,3 @@ func removeUserID(ids []uint64, userID uint64) []uint64 {
 	}
 	return store.CleanUserIDs(dst)
 }
-

@@ -1,11 +1,9 @@
 package app
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -26,33 +24,52 @@ func signJWT(secret []byte, userID uint64) (string, error) {
 	return t.SignedString(secret)
 }
 
-func (a *App) encryptRconPassword(plaintext string) (string, error) {
-	nonce := make([]byte, a.RconAead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return "", err
-	}
-	cipherText := a.RconAead.Seal(nil, nonce, []byte(plaintext), nil)
-	buf := make([]byte, 0, len(nonce)+len(cipherText))
-	buf = append(buf, nonce...)
-	buf = append(buf, cipherText...)
-	return base64.StdEncoding.EncodeToString(buf), nil
+func (a *App) storeRconPassword(plaintext string) (string, error) {
+	return plaintext, nil
 }
 
-func (a *App) decryptRconPassword(encoded string) (string, error) {
+func (a *App) readRconPassword(encoded string) (string, error) {
+	if plaintext, ok := a.tryDecryptLegacyRconPassword(encoded); ok {
+		return plaintext, nil
+	}
+	return encoded, nil
+}
+
+func (a *App) tryDecryptLegacyRconPassword(encoded string) (string, bool) {
+	if a.LegacyRconAead == nil {
+		return "", false
+	}
 	raw, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		return "", err
+		return "", false
 	}
-	nonceSize := a.RconAead.NonceSize()
+	nonceSize := a.LegacyRconAead.NonceSize()
 	if len(raw) <= nonceSize {
-		return "", errors.New("invalid ciphertext")
+		return "", false
 	}
-	nonce, cipherText := raw[:nonceSize], raw[nonceSize:]
-	plain, err := a.RconAead.Open(nil, nonce, cipherText, nil)
+	nonce, storedText := raw[:nonceSize], raw[nonceSize:]
+	plain, err := a.LegacyRconAead.Open(nil, nonce, storedText, nil)
 	if err != nil {
-		return "", err
+		return "", false
 	}
-	return string(plain), nil
+	return string(plain), true
+}
+
+func hashPassword(password string) (string, error) {
+	return password, nil
+}
+
+func verifyPassword(password, encoded string) (bool, error) {
+	if password == encoded {
+		return true, nil
+	}
+	if strings.HasPrefix(encoded, "pbkdf2_sha256$") {
+		return verifyPasswordPBKDF2SHA256(password, encoded)
+	}
+	if strings.HasPrefix(encoded, "argon2id$") {
+		return verifyPasswordArgon2id(password, encoded)
+	}
+	return false, nil
 }
 
 type argonParams struct {
@@ -60,13 +77,6 @@ type argonParams struct {
 	time    uint32
 	threads uint8
 	keyLen  uint32
-}
-
-var defaultArgon = argonParams{
-	memory:  64 * 1024,
-	time:    3,
-	threads: 2,
-	keyLen:  32,
 }
 
 type pbkdf2Params struct {
@@ -77,28 +87,6 @@ type pbkdf2Params struct {
 var defaultPbkdf2 = pbkdf2Params{
 	iter:   120000,
 	keyLen: 32,
-}
-
-func hashPassword(password string) (string, error) {
-	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		return "", err
-	}
-
-	hash := pbkdf2.Key([]byte(password), salt, defaultPbkdf2.iter, defaultPbkdf2.keyLen, sha256.New)
-	b64Salt := base64.RawStdEncoding.EncodeToString(salt)
-	b64Hash := base64.RawStdEncoding.EncodeToString(hash)
-	return fmt.Sprintf("pbkdf2_sha256$i=%d$%s$%s", defaultPbkdf2.iter, b64Salt, b64Hash), nil
-}
-
-func verifyPassword(password, encoded string) (bool, error) {
-	if strings.HasPrefix(encoded, "pbkdf2_sha256$") {
-		return verifyPasswordPBKDF2SHA256(password, encoded)
-	}
-	if strings.HasPrefix(encoded, "argon2id$") {
-		return verifyPasswordArgon2id(password, encoded)
-	}
-	return false, errors.New("invalid hash format")
 }
 
 func verifyPasswordPBKDF2SHA256(password, encoded string) (bool, error) {
@@ -144,16 +132,10 @@ func verifyPasswordArgon2id(password, encoded string) (bool, error) {
 		return false, errors.New("invalid hash format")
 	}
 
-	var p argonParams
-	p.keyLen = 32
-
 	memory, timeCost, threads, err := parseArgonParams(parts[2])
 	if err != nil {
 		return false, err
 	}
-	p.memory = memory
-	p.time = timeCost
-	p.threads = threads
 
 	salt, err := base64.RawStdEncoding.DecodeString(parts[3])
 	if err != nil {
@@ -163,19 +145,12 @@ func verifyPasswordArgon2id(password, encoded string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	p.keyLen = uint32(len(hash))
 
-	other := argon2.IDKey([]byte(password), salt, p.time, p.memory, p.threads, p.keyLen)
-	if subtleConstantTimeCompare(hash, other) {
-		return true, nil
-	}
-	return false, nil
+	other := argon2.IDKey([]byte(password), salt, timeCost, memory, threads, uint32(len(hash)))
+	return subtleConstantTimeCompare(hash, other), nil
 }
 
 func parseArgonParams(s string) (memory uint32, timeCost uint32, threads uint8, err error) {
-	memory = 0
-	timeCost = 0
-	threads = 0
 	items := strings.Split(s, ",")
 	for _, it := range items {
 		it = strings.TrimSpace(it)
@@ -215,4 +190,3 @@ func subtleConstantTimeCompare(a, b []byte) bool {
 	}
 	return out == 0
 }
-

@@ -1,0 +1,334 @@
+#!/usr/bin/env bash
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
+set -euo pipefail
+
+APP_DIR="${APP_DIR:-/app}"
+COMMON_CFG="${COMMON_CFG:-/data/config-lgsm/rustserver/common.cfg}"
+SERVER_IDENTITY="${SERVER_IDENTITY:-rustserver}"
+RUST_SERVER_DIR="${RUST_SERVER_DIR:-}"
+CURRENT_MAP_FILE="${CURRENT_MAP_FILE:-}"
+S3_PREFIX="${S3_PREFIX:-rust/maps}"
+S3_HOST="${S3_HOST:-}"
+S3_PORT="${S3_PORT:-}"
+S3_SECURE="${S3_SECURE:-}"
+S3_ENDPOINT_URL="${S3_ENDPOINT_URL:-}"
+PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}"
+WEBRCON_API_URL="${WEBRCON_API_URL:-https://rust-webrcon.carljoy.cn}"
+WEBRCON_PASSWORD="${WEBRCON_PASSWORD:-}"
+WEBRCON_SERVER_ID="${WEBRCON_SERVER_ID:-1}"
+STATE_FILE="${STATE_FILE:-/data/current-map-sync.env}"
+LOG_FILE="${LOG_FILE:-/data/current-map-sync.log}"
+CONTENT_TYPE="${CONTENT_TYPE:-application/octet-stream}"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+fail() {
+    log "失败: $*"
+    exit 1
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || fail "缺少命令: $1"
+}
+
+require_env() {
+    [ -n "${!1:-}" ] || fail "缺少环境变量: $1"
+}
+
+normalize_prefix() {
+    local prefix="${1:-}"
+    prefix="${prefix#/}"
+    prefix="${prefix%/}"
+    echo "$prefix"
+}
+
+normalize_bool() {
+    local value="${1:-}"
+    value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+    case "$value" in
+        1|true|yes|on) echo "true" ;;
+        0|false|no|off|"") echo "false" ;;
+        *) fail "非法布尔值: $1" ;;
+    esac
+}
+
+urlencode_path() {
+    local value="$1"
+    local encoded=""
+    local i char hex
+
+    for ((i = 0; i < ${#value}; i++)); do
+        char="${value:i:1}"
+        case "$char" in
+            [a-zA-Z0-9.~_/-]) encoded+="$char" ;;
+            ' ') encoded+='%20' ;;
+            '"') encoded+='%22' ;;
+            '#') encoded+='%23' ;;
+            '?') encoded+='%3F' ;;
+            '&') encoded+='%26' ;;
+            '+') encoded+='%2B' ;;
+            '%') encoded+='%25' ;;
+            *)
+                printf -v hex '%02X' "'$char"
+                encoded+="%$hex"
+                ;;
+        esac
+    done
+
+    echo "$encoded"
+}
+
+get_s3_endpoint_url() {
+    local secure protocol
+
+    if [ -n "$S3_ENDPOINT_URL" ]; then
+        echo "${S3_ENDPOINT_URL%/}"
+        return
+    fi
+
+    if [ -z "$S3_HOST" ]; then
+        echo ""
+        return
+    fi
+
+    secure="$(normalize_bool "$S3_SECURE")"
+    if [ "$secure" = "true" ]; then
+        protocol="https"
+    else
+        protocol="http"
+    fi
+
+    if [ -n "$S3_PORT" ]; then
+        echo "$protocol://$S3_HOST:$S3_PORT"
+    else
+        echo "$protocol://$S3_HOST"
+    fi
+}
+
+is_loopback_host() {
+    case "${1:-}" in
+        127.*|localhost|0.0.0.0) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+validate_public_url_config() {
+    local endpoint_url="$1"
+
+    if [ -n "$PUBLIC_BASE_URL" ] || [ -z "$endpoint_url" ]; then
+        return
+    fi
+
+    if is_loopback_host "$S3_HOST"; then
+        fail "S3 endpoint 是本机地址 ${S3_HOST}，必须额外提供玩家可访问的 PUBLIC_BASE_URL"
+    fi
+}
+
+aws_s3_cp() {
+    local src="$1"
+    local dst="$2"
+    local endpoint_url="$3"
+
+    if [ -n "$endpoint_url" ]; then
+        aws --endpoint-url "$endpoint_url" s3 cp "$src" "$dst" --content-type "$CONTENT_TYPE"
+    else
+        aws s3 cp "$src" "$dst" --content-type "$CONTENT_TYPE"
+    fi
+}
+
+aws_head_object() {
+    local bucket="$1"
+    local key="$2"
+    local endpoint_url="$3"
+
+    if [ -n "$endpoint_url" ]; then
+        aws --endpoint-url "$endpoint_url" s3api head-object --bucket "$bucket" --key "$key"
+    else
+        aws s3api head-object --bucket "$bucket" --key "$key"
+    fi
+}
+
+s3_object_exists() {
+    local s3_key="$1"
+    local endpoint_url="$2"
+    aws_head_object "$S3_BUCKET" "$s3_key" "$endpoint_url" >/dev/null 2>&1
+}
+
+build_public_url() {
+    local s3_key="$1"
+    local endpoint_url="$2"
+    local encoded_key
+    encoded_key="$(urlencode_path "$s3_key")"
+
+    if [ -n "$PUBLIC_BASE_URL" ]; then
+        echo "${PUBLIC_BASE_URL%/}/$encoded_key"
+    elif [ -n "$endpoint_url" ]; then
+        echo "${endpoint_url}/${S3_BUCKET}/$encoded_key"
+    else
+        require_env AWS_REGION
+        echo "https://${S3_BUCKET}.s3.${AWS_REGION}.amazonaws.com/$encoded_key"
+    fi
+}
+
+write_common_cfg_var() {
+    local key="$1"
+    local value="$2"
+    local escaped_value
+    mkdir -p "$(dirname "$COMMON_CFG")"
+    escaped_value="$(printf '%s' "$value" | sed 's/[&|\\]/\\&/g')"
+
+    if [ -f "$COMMON_CFG" ] && grep -qE "^[[:space:]]*${key}=" "$COMMON_CFG"; then
+        sed -i.bak -E "s|^[[:space:]]*${key}=.*$|${key}=\"${escaped_value}\"|" "$COMMON_CFG"
+    else
+        printf '\n%s="%s"\n' "$key" "$value" >> "$COMMON_CFG"
+    fi
+}
+
+send_runtime_levelurl() {
+    local map_url="$1"
+    local payload
+
+    if [ -z "$WEBRCON_API_URL" ] || [ -z "$WEBRCON_PASSWORD" ]; then
+        log "未配置 WebRCON，跳过运行时下发 levelurl。"
+        return
+    fi
+
+    payload="$(
+        python3 - "$map_url" "$WEBRCON_PASSWORD" <<'PY'
+import json
+import sys
+
+print(json.dumps({
+    "command": f'server.levelurl "{sys.argv[1]}"',
+    "password": sys.argv[2],
+}, ensure_ascii=False))
+PY
+    )"
+
+    curl -fsSL -X POST \
+        "${WEBRCON_API_URL%/}/api/servers/${WEBRCON_SERVER_ID}/command" \
+        -H 'Content-Type: application/json' \
+        -d "$payload" >> "$LOG_FILE" 2>&1
+}
+
+find_server_dir() {
+    if [ -n "$RUST_SERVER_DIR" ]; then
+        [ -d "$RUST_SERVER_DIR" ] || fail "RUST_SERVER_DIR 不存在: $RUST_SERVER_DIR"
+        echo "$RUST_SERVER_DIR"
+        return
+    fi
+
+    local candidates=(
+        "/data/serverfiles/server/$SERVER_IDENTITY"
+        "$APP_DIR/serverfiles/server/$SERVER_IDENTITY"
+        "$APP_DIR/server/$SERVER_IDENTITY"
+        "$APP_DIR/serverfiles/$SERVER_IDENTITY"
+        "$APP_DIR/serverfiles/server"
+    )
+
+    local dir
+    for dir in "${candidates[@]}"; do
+        if [ -d "$dir" ]; then
+            echo "$dir"
+            return
+        fi
+    done
+
+    fail "无法定位地图目录，请设置 RUST_SERVER_DIR"
+}
+
+get_file_mtime() {
+    stat -c '%Y' "$1" 2>/dev/null || stat -f '%m' "$1"
+}
+
+find_current_map_file() {
+    local server_dir="$1"
+
+    if [ -n "$CURRENT_MAP_FILE" ]; then
+        [ -f "$CURRENT_MAP_FILE" ] || fail "CURRENT_MAP_FILE 不存在: $CURRENT_MAP_FILE"
+        [ -s "$CURRENT_MAP_FILE" ] || fail "CURRENT_MAP_FILE 为空文件: $CURRENT_MAP_FILE"
+        echo "$CURRENT_MAP_FILE"
+        return
+    fi
+
+    find "$server_dir" -type f -name '*.map' -size +0c -print0 2>/dev/null \
+        | while IFS= read -r -d '' file; do
+            printf '%s\t%s\n' "$(get_file_mtime "$file")" "$file"
+        done \
+        | sort -t $'\t' -k1,1nr \
+        | head -n 1 \
+        | cut -f2-
+}
+
+main() {
+    require_command aws
+    require_command curl
+    require_command find
+    require_command grep
+    require_command python3
+    require_command sed
+    require_command sort
+    require_command stat
+    require_env S3_BUCKET
+
+    local endpoint_url
+    endpoint_url="$(get_s3_endpoint_url)"
+    validate_public_url_config "$endpoint_url"
+
+    local server_dir
+    server_dir="$(find_server_dir)"
+    log "地图目录: $server_dir"
+
+    local map_file
+    map_file="$(find_current_map_file "$server_dir")"
+    [ -n "$map_file" ] || fail "未找到可上传的当前 .map 文件"
+
+    local map_filename
+    map_filename="$(basename "$map_file")"
+    log "当前地图文件: $map_filename"
+
+    local s3_prefix
+    s3_prefix="$(normalize_prefix "$S3_PREFIX")"
+
+    local s3_key
+    if [ -n "$s3_prefix" ]; then
+        s3_key="$s3_prefix/$SERVER_IDENTITY/$map_filename"
+    else
+        s3_key="$SERVER_IDENTITY/$map_filename"
+    fi
+
+    if s3_object_exists "$s3_key" "$endpoint_url"; then
+        log "S3 已存在同名对象，跳过上传: s3://$S3_BUCKET/$s3_key"
+    else
+        log "上传当前地图到 S3: $map_filename -> s3://$S3_BUCKET/$s3_key"
+        aws_s3_cp "$map_file" "s3://$S3_BUCKET/$s3_key" "$endpoint_url" >> "$LOG_FILE" 2>&1
+    fi
+
+    log "校验 S3 对象存在..."
+    aws_head_object "$S3_BUCKET" "$s3_key" "$endpoint_url" >> "$LOG_FILE" 2>&1
+
+    local map_url
+    map_url="$(build_public_url "$s3_key" "$endpoint_url")"
+    log "地图 URL: $map_url"
+
+    log "写入 LinuxGSM common.cfg 的 levelurl..."
+    write_common_cfg_var "levelurl" "$map_url"
+
+    log "尝试下发运行时 levelurl..."
+    send_runtime_levelurl "$map_url"
+
+    mkdir -p "$(dirname "$STATE_FILE")"
+    cat > "$STATE_FILE" <<EOF
+MAP_FILENAME="$map_filename"
+MAP_LOCAL_PATH="$map_file"
+MAP_S3_KEY="$s3_key"
+MAP_URL="$map_url"
+SYNCED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+EOF
+
+    log "当前地图同步完成。"
+}
+
+main "$@"

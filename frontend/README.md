@@ -36,7 +36,6 @@
 {
   "bind_addr": "0.0.0.0:8084",
   "jwt_secret": "请替换为足够长的随机字符串",
-  "rcon_encryption_key": "请替换为32字节key（base64或64位hex）",
   "data_dir": "/app",
   "docker_bin": "docker"
 }
@@ -45,7 +44,6 @@
 说明：
 
 - `jwt_secret` 用于签发/验证登录 token；更换后旧 token 全部失效，需要重新登录
-- `rcon_encryption_key` 用于加密/解密保存的 RCON 密码；更换后历史加密数据无法解密，需要重新保存服务器信息
 - `data_dir` 会在该目录下创建 `users/`、`servers/`、`meta.json`
 
 ## 本地启动（开发）

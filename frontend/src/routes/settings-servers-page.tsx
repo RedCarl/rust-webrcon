@@ -31,6 +31,7 @@ type AdminServerDto = {
   rcon_password: string;
   container_name?: string | null;
   last_wipe_at: string;
+  always_use_today_wipe_date: boolean;
 };
 
 function formatDateTime(s: string) {
@@ -83,6 +84,7 @@ export default function SettingsServersPage() {
   const [editContainerName, setEditContainerName] = React.useState("");
   const [editLastWipeAt, setEditLastWipeAt] = React.useState("");
   const [editLastWipeOpen, setEditLastWipeOpen] = React.useState(false);
+  const [editAlwaysUseTodayWipeDate, setEditAlwaysUseTodayWipeDate] = React.useState(false);
 
   const refresh = React.useCallback(async () => {
     setLoading(true);
@@ -180,6 +182,7 @@ export default function SettingsServersPage() {
                             setEditPassword(s.rcon_password);
                             setEditContainerName(s.container_name ?? "");
                             setEditLastWipeAt(s.last_wipe_at ?? "");
+                            setEditAlwaysUseTodayWipeDate(Boolean(s.always_use_today_wipe_date));
                             setEditLastWipeOpen(false);
                           }}
                         >
@@ -281,7 +284,6 @@ export default function SettingsServersPage() {
               <Label htmlFor="create-password">RCON 密码</Label>
               <Input
                 id="create-password"
-                type="password"
                 value={createPassword}
                 onChange={(e) => setCreatePassword(e.target.value)}
               />
@@ -417,7 +419,6 @@ export default function SettingsServersPage() {
               <Label htmlFor="edit-password">RCON 密码</Label>
               <Input
                 id="edit-password"
-                type="password"
                 value={editPassword}
                 onChange={(e) => setEditPassword(e.target.value)}
               />
@@ -431,6 +432,18 @@ export default function SettingsServersPage() {
                 placeholder="rust-server"
               />
             </div>
+            <label className="flex items-center gap-3 rounded-md border px-3 py-2 text-sm md:col-span-2">
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={editAlwaysUseTodayWipeDate}
+                onChange={(e) => setEditAlwaysUseTodayWipeDate(e.target.checked)}
+              />
+              <div className="grid gap-1">
+                <span>始终以今天作为清档日期</span>
+                <span className="text-xs text-muted-foreground">开启后，接口每次返回的清档日期都会自动变成当天。</span>
+              </div>
+            </label>
             <div className="grid gap-2 md:col-span-2">
               <Label htmlFor="edit-last-wipe-at">清档时间（可选）</Label>
               <Popover open={editLastWipeOpen} onOpenChange={setEditLastWipeOpen}>
@@ -438,6 +451,7 @@ export default function SettingsServersPage() {
                   <Button
                     variant="outline"
                     id="edit-last-wipe-at"
+                    disabled={editAlwaysUseTodayWipeDate}
                     className={cn(
                       "w-[240px] justify-start text-left font-normal",
                       !editLastWipeAt && "text-muted-foreground",
@@ -506,6 +520,7 @@ export default function SettingsServersPage() {
                       rcon_password: pw,
                       container_name: editContainerName.trim() ? editContainerName.trim() : "",
                       last_wipe_at: editLastWipeAt.trim(),
+                      always_use_today_wipe_date: editAlwaysUseTodayWipeDate,
                     }),
                   });
                   setEditing(null);

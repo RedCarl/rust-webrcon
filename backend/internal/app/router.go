@@ -35,6 +35,7 @@ func (a *App) Router() *gin.Engine {
 		}
 
 		api.GET("/servers/:id/last-wipe", a.ginGetServerLastWipe)
+		api.POST("/servers/:id/command", a.ginServerCommand)
 
 		protected := api.Group("/")
 		protected.Use(a.ginAuthRequired())
@@ -44,11 +45,15 @@ func (a *App) Router() *gin.Engine {
 			protected.POST("/servers", a.ginCreateServer)
 			protected.PUT("/servers/:id", a.ginUpdateServer)
 			protected.DELETE("/servers/:id", a.ginDeleteServer)
+			protected.POST("/servers/:id/wipes", a.ginExecuteServerWipe)
 			protected.POST("/servers/:id/actions/:action", a.ginServerAction)
 
 			admin := protected.Group("/admin")
 			admin.Use(a.ginAdminRequired())
 			{
+				admin.GET("/settings/wipe", a.ginAdminGetWipeSettings)
+				admin.PUT("/settings/wipe", a.ginAdminUpdateWipeSettings)
+
 				admin.GET("/users", a.ginAdminListUsers)
 				admin.POST("/users", a.ginAdminCreateUser)
 				admin.PUT("/users/:id/password", a.ginAdminUpdateUserPassword)
@@ -58,10 +63,13 @@ func (a *App) Router() *gin.Engine {
 				admin.POST("/servers", a.ginAdminCreateServer)
 				admin.PUT("/servers/:id", a.ginAdminUpdateServer)
 				admin.DELETE("/servers/:id", a.ginAdminDeleteServer)
+
+				admin.GET("/player-data/bans", a.ginAdminGetPlayerDataBans)
+				admin.GET("/player-data/reports", a.ginAdminGetPlayerDataReports)
+				admin.GET("/player-data/stats", a.ginAdminGetPlayerDataStats)
 			}
 		}
 	}
 
 	return router
 }
-

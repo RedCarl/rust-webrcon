@@ -4,6 +4,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { useRcon } from "@/lib/rcon-context";
 
+const COMMAND_HISTORY_KEY = "rustpanel-console-command-history";
+const MAX_COMMAND_HISTORY = 50;
+
 type ConsoleMessage = {
   Type?: string;
   Message?: string;
@@ -26,11 +29,30 @@ function getMessageTimestamp(msg: ConsoleMessage): number | null {
   return null;
 }
 
+function loadCommandHistory(): string[] {
+  try {
+    const raw = localStorage.getItem(COMMAND_HISTORY_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  } catch {
+    return [];
+  }
+}
+
+function saveCommandHistory(history: string[]) {
+  localStorage.setItem(COMMAND_HISTORY_KEY, JSON.stringify(history));
+}
+
 export default function ConsolePage() {
   const { request, send, client } = useRcon();
   const [output, setOutput] = React.useState<ConsoleMessage[]>([]);
   const [command, setCommand] = React.useState("");
+  const [history, setHistory] = React.useState<string[]>(() => loadCommandHistory());
+  const [historyIndex, setHistoryIndex] = React.useState<number | null>(null);
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
+  const draftCommandRef = React.useRef("");
 
   const append = React.useCallback((msg: ConsoleMessage) => {
     const message = stripHtml(msg.Message);
@@ -79,6 +101,58 @@ export default function ConsolePage() {
     scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [output.length]);
 
+  const handleSubmit = React.useCallback(() => {
+    const nextCommand = command.trim();
+    if (!nextCommand) return;
+
+    append({ Type: "Command", Message: nextCommand });
+    send(nextCommand, 1);
+
+    const nextHistory = [...history.filter((item) => item !== nextCommand), nextCommand].slice(-MAX_COMMAND_HISTORY);
+    setHistory(nextHistory);
+    saveCommandHistory(nextHistory);
+    setCommand("");
+    setHistoryIndex(null);
+    draftCommandRef.current = "";
+  }, [append, command, history, send]);
+
+  const handleHistoryKeyDown = React.useCallback(
+    (event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      if (history.length === 0) return;
+
+      event.preventDefault();
+
+      if (event.key === "ArrowUp") {
+        if (historyIndex === null) {
+          draftCommandRef.current = command;
+          const nextIndex = history.length - 1;
+          setHistoryIndex(nextIndex);
+          setCommand(history[nextIndex] ?? "");
+          return;
+        }
+
+        const nextIndex = Math.max(0, historyIndex - 1);
+        setHistoryIndex(nextIndex);
+        setCommand(history[nextIndex] ?? "");
+        return;
+      }
+
+      if (historyIndex === null) return;
+
+      const nextIndex = historyIndex + 1;
+      if (nextIndex >= history.length) {
+        setHistoryIndex(null);
+        setCommand(draftCommandRef.current);
+        return;
+      }
+
+      setHistoryIndex(nextIndex);
+      setCommand(history[nextIndex] ?? "");
+    },
+    [command, history, historyIndex],
+  );
+
   return (
     <div className="grid gap-4">
       <Card>
@@ -104,14 +178,21 @@ export default function ConsolePage() {
             className="flex gap-2"
             onSubmit={(e) => {
               e.preventDefault();
-              const c = command.trim();
-              if (!c) return;
-              append({ Type: "Command", Message: c });
-              send(c, 1);
-              setCommand("");
+              handleSubmit();
             }}
           >
-            <Input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="输入命令并回车" />
+            <Input
+              value={command}
+              onChange={(e) => {
+                const nextValue = e.target.value;
+                setCommand(nextValue);
+                if (historyIndex === null) {
+                  draftCommandRef.current = nextValue;
+                }
+              }}
+              onKeyDown={handleHistoryKeyDown}
+              placeholder="输入命令并回车，可用上下键切换历史命令"
+            />
             <Button type="submit">发送</Button>
           </form>
         </CardContent>

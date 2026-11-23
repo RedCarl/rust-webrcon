@@ -53,7 +53,6 @@ export default function ConnectPage() {
               <Label htmlFor="password">密码</Label>
               <Input
                 id="password"
-                type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 autoComplete="off"
